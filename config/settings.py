@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -43,6 +44,25 @@ MIDDLEWARE = [
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
 
+
+def database_from_url(url: str) -> dict:
+    """A hosted Postgres (Neon, Supabase, Vercel Postgres) gives one URL; its pooler
+    ends each connection with the request, so nothing is kept open between them."""
+    parts = urlsplit(url)
+    options = dict(parse_qsl(parts.query))
+    return {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": unquote(parts.path.lstrip("/")),
+        "USER": unquote(parts.username or ""),
+        "PASSWORD": unquote(parts.password or ""),
+        "HOST": parts.hostname or "",
+        "PORT": str(parts.port or 5432),
+        "OPTIONS": {"sslmode": options.get("sslmode", "require")},
+        "CONN_MAX_AGE": 0,
+    }
+
+
+DATABASE_URL = env("DATABASE_URL", "")
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -53,8 +73,9 @@ DATABASES = {
         # /cloudsql/<project>:<region>:<instance>
         "HOST": env("DB_HOST", "localhost"),
         "PORT": env("DB_PORT", "5432"),
-        "ATOMIC_REQUESTS": True,
         "CONN_MAX_AGE": 60,
+        **(database_from_url(DATABASE_URL) if DATABASE_URL else {}),
+        "ATOMIC_REQUESTS": True,
         "CONN_HEALTH_CHECKS": True,
     }
 }
