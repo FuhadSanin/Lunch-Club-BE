@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Lint, types, Django checks, security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: make lint
+      - run: make typecheck
+      - run: make check
+      - run: make security
+
+  test:
+    name: Tests and coverage
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-retries 30
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: make test
+
+  image:
+    name: Production image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: make image

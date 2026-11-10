@@ -1,0 +1,68 @@
+# Local development: Postgres, the API and the web app (../lunch-board), each restarting or
+# reloading when its code changes. Start with `docker compose up --watch`.
+name: lunch
+
+services:
+  db:
+    image: postgres:17-alpine
+    env_file: .env
+    environment:
+      POSTGRES_PASSWORD: postgres # the superuser; tests use it, the app does not
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./docker/postgres-init.sh:/docker-entrypoint-initdb.d/init.sh:ro
+    ports:
+      - "127.0.0.1:${DB_HOST_PORT:-5434}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d $${DB_NAME}"]
+      interval: 2s
+      retries: 30
+
+  api:
+    build: { context: ., target: dev }
+    env_file: .env
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      # `api` is the host name the web app's dev proxy uses.
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,api
+      # Links in emails and notifications open the web app below.
+      APP_URL: http://localhost:${WEB_PORT:-5174}
+    # runserver restarts itself whenever a .py file changes.
+    command: >
+      sh -c "python manage.py migrate --noinput
+      && python manage.py dev_company
+      && python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - .:/app
+    ports:
+      - "127.0.0.1:${API_PORT:-8001}:8000"
+    depends_on:
+      db: { condition: service_healthy }
+    develop:
+      watch:
+        # New dependencies need a new image.
+        - { action: rebuild, path: pyproject.toml }
+        - { action: rebuild, path: uv.lock }
+
+  web:
+    image: node:22-alpine
+    working_dir: /app
+    environment:
+      API_URL: http://api:8000
+      VITE_POLL: "1" # file events from the Mac do not always reach the container
+    # Vite reloads the page on every change.
+    command: sh -c "npm ci --no-audit --no-fund && npx vite --host 0.0.0.0 --port 5173"
+    volumes:
+      - ../lunch-board:/app
+      - web-node-modules:/app/node_modules # Linux packages, kept apart from the Mac's
+    ports:
+      - "127.0.0.1:${WEB_PORT:-5174}:5173"
+    depends_on: [api]
+    develop:
+      watch:
+        - { action: restart, path: ../lunch-board/package-lock.json }
+
+volumes:
+  db-data:
+  web-node-modules:

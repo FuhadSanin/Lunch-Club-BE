@@ -1,0 +1,114 @@
+[project]
+name = "group-lunch-backend"
+version = "0.1.0"
+description = "Backend for the multi-restaurant group lunch app"
+requires-python = ">=3.12"
+dependencies = [
+    "django>=6.1,<6.2",
+    "djangorestframework>=3.18,<3.19",
+    "psycopg[binary]>=3.3,<3.4",
+    "gunicorn>=23",
+    "firebase-admin>=7",
+    "google-cloud-tasks>=2.19",
+    "google-auth>=2.40",
+    "sentry-sdk[django]>=2.30",
+    "httpx>=0.28,<1",
+]
+
+[dependency-groups]
+bot = [
+    "playwright>=1.50",
+]
+dev = [
+    "bandit>=1.9.4",
+    "django-stubs>=6.1.2",
+    "djangorestframework-stubs>=3.18.2",
+    "mypy>=2.4.1",
+    "pip-audit>=2.10.1",
+    "pre-commit>=4.7.0",
+    "pytest>=8",
+    "pytest-cov>=7.1.0",
+    "pytest-django>=4.11",
+    "ruff>=0.12",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.test_settings"
+python_files = ["test_*.py"]
+testpaths = ["tests"]
+addopts = "--reuse-db"
+
+[tool.coverage.run]
+source = ["apps", "config"]
+omit = ["*/migrations/*", "config/wsgi.py"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+# The standalone Swiggy cart script is a one-off dev tool, not app code.
+extend-exclude = ["*/migrations/*", "swiggy_add_latest_session_to_cart.py"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle, including trailing whitespace
+    "F",       # pyflakes: unused imports and names
+    "I",       # import order: standard library, third party, first party
+    "N",       # naming: snake_case, PascalCase, UPPER_SNAKE_CASE
+    "B",       # likely bugs
+    "UP",      # modern syntax
+    "DJ",      # Django: __str__ on models, no null on text fields, ...
+    "SIM",     # simpler code
+    "C90",     # cyclomatic complexity
+    "PLR",     # size limits: arguments, branches, statements, returns
+    "S",       # security (bandit's rules)
+    "T20",     # no print()
+]
+ignore = [
+    "N818",    # RetryLater and HostActionRequired are signals, not errors
+    "PLR2004", # a literal is often the clearest way to say it
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-positional-args = 5
+max-statements = 50
+max-branches = 10
+max-returns = 6
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106", "PLR0913", "PLR0917"]
+# A command-line tool: it talks to the person running it.
+"swiggy_live_menu_inspector.py" = ["T20"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["mypy_django_plugin.main", "mypy_drf_plugin.main"]
+exclude = ["/migrations/"]
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = ["firebase_admin.*", "google.*"]
+ignore_missing_imports = true
+
+[tool.django-stubs]
+django_settings_module = "config.test_settings"
+
+[tool.bandit]
+# Applied migrations are never edited, so they are not checked either.
+exclude_dirs = ["tests", ".venv", "migrations"]
+
+# Tests use fakes and monkeypatching that the type checker can't follow.
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disable_error_code = ["var-annotated", "attr-defined", "method-assign", "arg-type"]

@@ -1,0 +1,28 @@
+schema: spec-driven
+
+context: |
+  Product: a group lunch app. A host starts a lunch, everyone in the company picks dishes
+  from any Swiggy restaurant, picks lock at a cutoff, and the app places them as Swiggy
+  orders (up to 5 restaurants per checkout). Source design: "Multi-Restaurant Group Order
+  App — Architecture Design" (Claude Doc, 2 Nov 2026).
+
+  Backend stack: Python 3.12+, Django 6.1, Django REST framework, PostgreSQL (Cloud SQL)
+  with row-level security, Firebase Auth (Google sign-in), Firestore (live board, written
+  by the server only), Google Cloud Tasks (background jobs), Firebase Cloud Messaging and
+  email (notifications), Sentry (error alerts). Runs on Cloud Run in asia-south1.
+
+  Code layout: apps/core (jobs, tenancy, notifications), apps/accounts (companies, people,
+  sign-in), apps/lunches (lunches, picks, live board), apps/ordering (placing and tracking
+  Swiggy orders through a pluggable provider).
+
+  Conventions:
+  - Money is integer paise; times are stored in UTC and shown in Asia/Kolkata.
+  - Business rules live in services.py; views only parse input and shape output.
+  - Every state change that others can see republishes the live board after commit.
+
+rules:
+  specs:
+    - Describe behaviour people and the web app can observe, not internal classes.
+    - Every requirement has at least one scenario that a test in tests/ covers.
+  tasks:
+    - Each task group lists the tests that prove it.

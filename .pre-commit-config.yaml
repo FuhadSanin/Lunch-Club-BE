@@ -1,0 +1,51 @@
+# Runs on every `git commit` (install once with `make hooks`). The project checks use the
+# tool versions locked in uv.lock, through the same make targets CI runs.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff lint (fixes what it can)
+        entry: uv run ruff check --fix --force-exclude
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types: [python]
+      - id: mypy
+        name: mypy
+        entry: make typecheck
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: django-check
+        name: django checks
+        entry: make check
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: security
+        name: bandit and pip-audit
+        entry: make security
+        language: system
+        files: \.py$|^pyproject\.toml$|^uv\.lock$
+        pass_filenames: false
+      - id: tests
+        name: tests with coverage (starts the compose database)
+        entry: make test
+        language: system
+        files: \.py$|^pyproject\.toml$|^uv\.lock$
+        pass_filenames: false
