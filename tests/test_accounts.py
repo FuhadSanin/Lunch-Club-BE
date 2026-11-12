@@ -1,4 +1,7 @@
+from datetime import timedelta
+
 import pytest
+from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.test import APIRequestFactory
 
@@ -51,10 +54,27 @@ def test_request_without_a_token_is_unauthenticated(db, client):
     assert client.get("/api/me").status_code == 401
 
 
-def test_person_without_a_company_cannot_see_lunches(db):
+def test_person_without_a_company_has_no_lunches_to_see(db):
     user = make_user(None, "Solo")
 
-    assert client_for(user).get("/api/lunches").status_code == 403
+    response = client_for(user).get("/api/lunches")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_a_company_person_without_a_company_cannot_start_a_lunch(db):
+    # Only public emails get a personal party; a company address sets up its company.
+    outsider = user_for_token(claims("someone@startup.io"))
+    cutoff = timezone.now() + timedelta(hours=1)
+
+    response = client_for(outsider).post(
+        "/api/lunches",
+        {"cutoff_at": cutoff.isoformat(), "delivery_address": "Office"},
+        format="json",
+    )
+
+    assert response.status_code == 403
 
 
 def test_setting_up_a_company_gives_the_founder_every_permission(db):
@@ -72,16 +92,38 @@ def test_setting_up_a_company_gives_the_founder_every_permission(db):
     assert teammate.org_id == founder.org_id
 
 
-def test_gmail_company_accepts_gmail_members(db):
+def test_a_public_email_cannot_make_a_company(db):
     founder = user_for_token(claims("founder@gmail.com"))
+
     response = client_for(founder).post(
         "/api/company", {"name": "Gmail team"}, format="json"
     )
 
-    assert response.status_code == 201
-    assert response.json()["email_domain"] == "gmail.com"
-    member = user_for_token(claims("member@gmail.com", uid="uid-gmail-member"))
-    assert member.org_id == founder.org_id
+    assert response.status_code == 409
+    assert "public email" in response.json()["detail"]
+
+
+def test_people_with_public_emails_never_share_an_org(db):
+    first = user_for_token(claims("first@gmail.com", uid="uid-first"))
+    second = user_for_token(claims("second@gmail.com", uid="uid-second"))
+    outlook = user_for_token(claims("third@outlook.com", uid="uid-third"))
+
+    assert first.org is None
+    assert second.org is None
+    assert outlook.org is None
+
+
+def test_me_says_whether_the_email_is_public(db, company):
+    gmail = user_for_token(claims("someone@gmail.com", uid="uid-g"))
+    acme = user_for_token(claims("someone@acme.com", uid="uid-a"))
+
+    mine = client_for(gmail).get("/api/me").json()
+    theirs = client_for(acme).get("/api/me").json()
+
+    assert mine["public_email"] is True
+    assert mine["org"] is None
+    assert theirs["public_email"] is False
+    assert theirs["org"]["kind"] == "company"
 
 
 def test_only_the_company_email_domain_joins(company):

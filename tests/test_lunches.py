@@ -402,7 +402,7 @@ def test_unlocking_needs_session_update(lunch, member):
 def test_a_lunch_link_opens_the_running_lunch(lunch, settings):
     settings.APP_URL = "https://lunch.example"
 
-    assert services.lunch_link(lunch) == "https://lunch.example/#/pick"
+    assert services.lunch_link(lunch) == f"https://lunch.example/#/lunch/{lunch.id}"
 
 
 def test_a_person_without_a_company_cannot_start_a_lunch(db):

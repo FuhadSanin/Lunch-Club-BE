@@ -1,3 +1,4 @@
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Q
 
@@ -23,11 +24,30 @@ class OrderSession(BaseModel):
     host = models.ForeignKey(
         User, on_delete=models.PROTECT, related_name="hosted_lunches"
     )
+    # What the host calls it ("Friday biryani"); empty shows the host's name instead.
+    name = models.CharField(max_length=80, blank=True)
     cutoff_at = models.DateTimeField()
     delivery_address = models.TextField()
+    # Where the address is, when the host picked it from the suggestions.
+    delivery_lat = models.FloatField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(-90), MaxValueValidator(90)],
+    )
+    delivery_lng = models.FloatField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(-180), MaxValueValidator(180)],
+    )
     status = models.CharField(
         max_length=12, choices=SessionStatus.choices, default=SessionStatus.OPEN
     )
+    # The restaurants the host offered, as shown when it started (id, name, photo,
+    # rating...; no menus), so everyone in the lunch sees the same list.
+    offered_restaurants = models.JSONField(default=list, blank=True)
+    # When the host closed it, after the food arrived and was handed out. A closed
+    # lunch is over for everyone in it, in every browser.
+    closed_at = models.DateTimeField(null=True, blank=True)
     skipped_by = models.ManyToManyField(
         User, related_name="skipped_lunches", db_table="order_session_skips", blank=True
     )
@@ -47,9 +67,46 @@ class OrderSession(BaseModel):
                 fields=["org", "-created_at"], name="order_sessions_org_recent"
             )
         ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(delivery_lat__isnull=True, delivery_lng__isnull=True)
+                | Q(delivery_lat__isnull=False, delivery_lng__isnull=False),
+                name="order_sessions_delivery_point_both_or_neither",
+            )
+        ]
 
     def __str__(self) -> str:
         return f"Lunch closing {self.cutoff_at:%Y-%m-%d %H:%M} ({self.status})"
+
+
+class SessionMember(BaseModel):
+    """Someone who joined a lunch by its link, from outside the host's org.
+
+    Joining is how people reach a personal party's lunch. The row is what lets the
+    database show them that one lunch (see lunches/migrations/0006_party_sessions).
+    """
+
+    session = models.ForeignKey(
+        OrderSession, on_delete=models.CASCADE, related_name="members"
+    )
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="joined_sessions"
+    )
+    # The lunch's org (the host's), so it can see who joined (migration 0008).
+    org = models.ForeignKey(
+        "accounts.Organization", on_delete=models.CASCADE, related_name="+"
+    )
+
+    class Meta:
+        db_table = "session_members"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "user"], name="session_members_unique"
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user_id} in {self.session_id}"
 
 
 class OrderStatus(models.TextChoices):

@@ -29,7 +29,7 @@ def test_database_shows_only_the_active_companys_lunches(company, other_company)
 
     with connection.cursor() as cursor:
         cursor.execute("CREATE ROLE probe_app NOLOGIN")
-        cursor.execute("GRANT SELECT ON order_sessions TO probe_app")
+        cursor.execute("GRANT SELECT ON order_sessions, session_members TO probe_app")
 
     assert visible_lunches(company.id) == {str(company.id)}
     assert visible_lunches(other_company.id) == {str(other_company.id)}

@@ -2,6 +2,7 @@ import httpx
 import pytest
 from django.core.cache import cache
 
+from apps.accounts.models import User
 from apps.catalog import swiggy
 from tests.conftest import client_for, make_user
 
@@ -257,7 +258,21 @@ def test_dish_search_needs_two_letters(member, swiggy_api):
     )
 
 
-def test_people_without_a_company_cannot_browse(db, swiggy_api):
-    loner = make_user(None, "Lone")
+def test_company_people_without_a_company_cannot_browse(db, swiggy_api):
+    loner = User.objects.create(
+        email="lone@startup.io", firebase_uid="uid-lone", name="Lone"
+    )
 
     assert client_for(loner).get("/api/restaurants", OFFICE).status_code == 403
+
+
+def test_people_with_a_public_email_can_browse_without_a_company(db, swiggy_api):
+    loner = make_user(None, "Lone")  # a Gmail address, no org
+
+    assert client_for(loner).get("/api/restaurants", OFFICE).status_code == 200
+
+
+def test_a_member_without_the_permission_cannot_browse(company, swiggy_api):
+    pia = make_user(company, "Pia", set())
+
+    assert client_for(pia).get("/api/restaurants", OFFICE).status_code == 403

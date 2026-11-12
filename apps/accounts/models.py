@@ -11,13 +11,26 @@ class RestaurantMode(models.TextChoices):
     MANUAL = "manual"  # the host picks them
 
 
+class OrgKind(models.TextChoices):
+    COMPANY = "company"  # people sign in with the company's email domain
+    PERSONAL = "personal"  # one person's party: they host, others join by link
+
+
 class Organization(BaseModel):
     """A company. People who sign in with an @email_domain address join it: anyone, or
-    with `auto_join` off only those invited."""
+    with `auto_join` off only those invited.
+
+    A personal org belongs to one person with a public email (Gmail and the like); it
+    has no email domain, and people reach its lunches by joining them, not by address.
+    """
 
     name = models.CharField(max_length=120)
     team_name = models.CharField(max_length=120, blank=True)
-    email_domain = models.CharField(max_length=253, unique=True)
+    kind = models.CharField(
+        max_length=10, choices=OrgKind.choices, default=OrgKind.COMPANY
+    )
+    # Unique among companies only; a personal org leaves it empty.
+    email_domain = models.CharField(max_length=253, blank=True)
     auto_join = models.BooleanField(default=True)
     # How a new lunch chooses its restaurants, and what "nearby" means.
     restaurant_mode = models.CharField(
@@ -41,6 +54,11 @@ class Organization(BaseModel):
     class Meta:
         db_table = "organizations"
         constraints = [
+            models.UniqueConstraint(
+                fields=["email_domain"],
+                condition=Q(kind="company"),
+                name="organizations_company_domain_unique",
+            ),
             models.CheckConstraint(
                 condition=Q(radius_km__gte=0.5, radius_km__lte=8.0),
                 name="organizations_radius_range",

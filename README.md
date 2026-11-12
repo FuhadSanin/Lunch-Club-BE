@@ -36,18 +36,21 @@ keeps at least one person with `member_update`. `GET /api/permissions` lists the
 
 | Method | Path | Permission | What |
 |---|---|---|---|
-| GET | `/api/me` | signed in | You, your company (`org: null` until set up) and your permissions |
+| GET | `/api/me` | signed in | You, your org (`org: null` until set up or until a public-email person hosts), `org.kind` (`company` or `personal`), `public_email`, and your permissions |
 | POST | `/api/me/push-token` | in a company | Subscribe this device to company notifications |
-| POST | `/api/company` | no company yet | Set up your company; you get every permission |
+| POST | `/api/company` | no company yet | Set up your company; you get every permission (public emails like Gmail can't: they host a personal party instead) |
 | GET | `/api/permissions` | in a company | Every permission and what it allows |
 | GET | `/api/company/members` | `member_read` | Everyone in the company, with their permissions |
 | PUT | `/api/company/members/<id>/permissions` | `member_update` | Set someone's permissions: `{"permissions": [...]}` |
 | GET | `/api/restaurants?lat=&lng=[&q=]` | `restaurant_read` | Swiggy restaurants near a place, or matching `q` |
 | GET | `/api/restaurants/<id>/menu?lat=&lng=` | `restaurant_read` | A restaurant's details and full menu (prices in paise) |
 | GET | `/api/dishes?lat=&lng=&q=` | `restaurant_read` | Dishes by name, each with its restaurant |
-| GET | `/api/lunches` | `session_read` | Last 30 lunches |
-| POST | `/api/lunches` | `session_create` | Start a lunch: `cutoff_at`, `delivery_address` |
+| GET | `/api/places?q=[&lat=&lng=]` | `restaurant_read`, or a public email | Place suggestions while typing an address (OpenStreetMap: Photon) |
+| GET | `/api/places/<place_id>` | `restaurant_read`, or a public email | The address and `lat`/`lng` of a suggested place |
+| GET | `/api/lunches` | `session_read` | Last 30 lunches: your org's and the ones you joined (`joined: true`) |
+| POST | `/api/lunches` | `session_create` | Start a lunch: `cutoff_at`, `delivery_address`, optional `name`, `delivery_lat`, `delivery_lng`. A public-email person with no org gets a personal party made for them |
 | GET | `/api/lunches/<id>` | `session_read` | The full board (what a shared link opens) |
+| POST | `/api/lunches/<id>/join` | signed in | Join a personal party's lunch from its link (a company's lunch only its own people); answers with the board |
 | POST | `/api/lunches/<id>/lock` | `session_update` | Close picks before the cutoff |
 | POST | `/api/lunches/<id>/cancel` | `session_delete` | Call off a lunch not yet confirmed |
 | POST | `/api/lunches/<id>/items` | `pick_create` | Pick a dish |
@@ -61,6 +64,14 @@ keeps at least one person with `member_update`. `GET /api/permissions` lists the
 | GET | `/healthz` | anyone | Liveness |
 
 The lunch's host is still the person who started it: they get the emails about it.
+
+**Companies and personal parties.** People with a company email domain share a company:
+the first to set it up is its owner with every permission, and people who join get the
+member set (they pick food but can't start lunches or change settings). People with a
+public email (`PUBLIC_EMAIL_DOMAINS`: Gmail and the like) never share an org: each gets
+a personal party when they first start a lunch, and others reach that lunch by joining
+it from its link. A joined person has the member set on that one lunch only; the
+database shows them nothing else (row-level security by org, or by membership).
 
 ## Run locally
 

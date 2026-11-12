@@ -7,7 +7,12 @@ from rest_framework.exceptions import PermissionDenied
 
 from apps.accounts import services
 from apps.accounts.models import ALL_PERMISSIONS, MEMBER_PERMISSIONS, Permission
-from apps.accounts.permissions import HasRequiredPermission
+from apps.accounts.permissions import (
+    HasRequiredPermission,
+    MayStartOwnLunch,
+    MayTakePart,
+)
+from apps.catalog.views import CanBrowse
 from apps.lunches.models import OrderItem, SwiggyOrder
 from tests.conftest import client_for, make_user
 
@@ -31,6 +36,8 @@ ENDPOINTS = [
     ("get", "/api/restaurants?lat=10&lng=76", Permission.RESTAURANT_READ),
     ("get", "/api/restaurants/1/menu?lat=10&lng=76", Permission.RESTAURANT_READ),
     ("get", "/api/dishes?lat=10&lng=76&q=dosa", Permission.RESTAURANT_READ),
+    ("get", "/api/places?q=infopark", Permission.RESTAURANT_READ),
+    ("get", "/api/places/W731817480", Permission.RESTAURANT_READ),
     ("get", "/api/company/members", Permission.MEMBER_READ),
     ("patch", "/api/company/settings", Permission.COMPANY_UPDATE),
     ("post", "/api/company/addresses", Permission.COMPANY_UPDATE),
@@ -54,7 +61,9 @@ def guarded_views():
 
     for pattern in walk(get_resolver().url_patterns):
         view = getattr(pattern.callback, "view_class", None)
-        if view and HasRequiredPermission in getattr(view, "permission_classes", []):
+        classes = getattr(view, "permission_classes", [])
+        checks = (HasRequiredPermission, MayTakePart, MayStartOwnLunch, CanBrowse)
+        if view and any(check in classes for check in checks):
             yield view
 
 

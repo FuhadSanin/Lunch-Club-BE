@@ -192,3 +192,25 @@ if SENTRY_DSN:
     import sentry_sdk
 
     sentry_sdk.init(dsn=SENTRY_DSN, send_default_pii=False, traces_sample_rate=0.1)
+
+# Email domains anyone can have (Gmail and the like). They never form a company: each
+# person there hosts their own party instead, and others join a lunch by its link.
+PUBLIC_EMAIL_DOMAINS = frozenset(
+    domain.strip().lower()
+    for domain in env(
+        "PUBLIC_EMAIL_DOMAINS",
+        "gmail.com,googlemail.com,yahoo.com,yahoo.in,ymail.com,outlook.com,"
+        "hotmail.com,live.com,msn.com,icloud.com,me.com,aol.com,proton.me,"
+        "protonmail.com,rediffmail.com,zoho.com,gmx.com",
+    ).split(",")
+    if domain.strip()
+)
+
+# Place suggestions while typing an address (OpenStreetMap data; Swiggy's own place
+# search isn't reachable without its app). Photon suggests, Nominatim describes one.
+PLACES_SUGGEST_URL = env("PLACES_SUGGEST_URL", "https://photon.komoot.io/api/")
+PLACES_LOOKUP_URL = env(
+    "PLACES_LOOKUP_URL", "https://nominatim.openstreetmap.org/lookup"
+)
+PLACES_USER_AGENT = env("PLACES_USER_AGENT", "lunch-backend/1.0 (group lunch app)")
+PLACES_CACHE_SECONDS = int(env("PLACES_CACHE_SECONDS", "86400"))

@@ -1,13 +1,14 @@
 from rest_framework import serializers
 
 from apps.accounts.models import Invite, OfficeAddress, Organization, Permission, User
+from apps.accounts.services import is_public_email
 
 
 class OrganizationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Organization
-        fields = ["id", "name", "email_domain"]
-        read_only_fields = ["id", "email_domain"]
+        fields = ["id", "name", "email_domain", "kind"]
+        read_only_fields = ["id", "email_domain", "kind"]
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -19,10 +20,15 @@ class UserSerializer(serializers.ModelSerializer):
 
 class MeSerializer(UserSerializer):
     org = OrganizationSerializer(read_only=True)
+    # A public email (Gmail and the like) hosts a personal party, not a company.
+    public_email = serializers.SerializerMethodField()
 
     class Meta(UserSerializer.Meta):
-        fields = [*UserSerializer.Meta.fields, "org"]
+        fields = [*UserSerializer.Meta.fields, "org", "public_email"]
         read_only_fields = fields
+
+    def get_public_email(self, user: User) -> bool:
+        return is_public_email(user.email)
 
 
 class PermissionsSerializer(serializers.Serializer):

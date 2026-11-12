@@ -14,7 +14,7 @@ def with_board(lunches: QuerySet[OrderSession]) -> QuerySet[OrderSession]:
     orders = SwiggyOrder.objects.order_by("created_at").prefetch_related(
         Prefetch("items", queryset=order_items)
     )
-    return lunches.select_related("host").prefetch_related(
+    return lunches.select_related("host", "org").prefetch_related(
         Prefetch("items", queryset=items),
         Prefetch("orders", queryset=orders),
         "skipped_by",

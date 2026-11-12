@@ -17,6 +17,7 @@ from apps.accounts.models import (
     MEMBER_PERMISSIONS,
     Invite,
     Organization,
+    OrgKind,
     Permission,
     User,
 )
@@ -26,6 +27,11 @@ from apps.core.errors import Conflict
 
 def email_domain(email: str) -> str:
     return email.rsplit("@", 1)[-1].lower()
+
+
+def is_public_email(email: str) -> bool:
+    """Gmail and the like: anyone can have one, so they never make a company."""
+    return email_domain(email) in settings.PUBLIC_EMAIL_DOMAINS
 
 
 def user_for_token(claims: dict) -> User:
@@ -38,8 +44,10 @@ def user_for_token(claims: dict) -> User:
         firebase_uid=claims["uid"],
         defaults={"email": email.lower(), "name": claims.get("name", "")},
     )
-    if user.org_id is None:
-        org = Organization.objects.filter(email_domain=email_domain(user.email)).first()
+    if user.org_id is None and not is_public_email(user.email):
+        org = Organization.objects.filter(
+            kind=OrgKind.COMPANY, email_domain=email_domain(user.email)
+        ).first()
         if org and _may_join(org, user.email):
             _set_company(user, org, MEMBER_PERMISSIONS)
     return user
@@ -62,6 +70,8 @@ def invite(inviter: User, emails: Iterable[str]) -> list[Invite]:
     org = inviter.org
     if org is None:  # views only let people with a company in
         raise Conflict("Set up or join your company first.")
+    if org.kind == OrgKind.PERSONAL:
+        raise Conflict("A personal party has no company to invite people to.")
     wanted = sorted({email.lower() for email in emails})
     outside = [e for e in wanted if email_domain(e) != org.email_domain]
     if outside:
@@ -116,9 +126,34 @@ def create_company(user: User, name: str) -> Organization:
     if user.org_id:
         raise Conflict("You already belong to a company.")
     domain = email_domain(user.email)
-    if Organization.objects.filter(email_domain=domain).exists():
+    if is_public_email(user.email):
+        raise Conflict(
+            f"@{domain} is a public email address, so it can't make a company. "
+            "Start a lunch and share its link instead."
+        )
+    if Organization.objects.filter(kind=OrgKind.COMPANY, email_domain=domain).exists():
         raise Conflict("A company for your email domain already exists.")
     org = Organization.objects.create(name=name, email_domain=domain)
+    _set_company(user, org, ALL_PERMISSIONS)
+    return org
+
+
+def create_personal_org(user: User) -> Organization:
+    """The signed-in person's own party, made when they first host. Safe to repeat.
+
+    Only people with a public email get one: everyone else is in, or sets up, their
+    company. They have every permission in it.
+    """
+    User.objects.select_for_update().get(id=user.id)  # two starts at once wait here
+    user.refresh_from_db(fields=["org", "permissions"])
+    if user.org is not None:
+        return user.org
+    if not is_public_email(user.email):
+        raise Conflict("Set up or join your company first.")
+    first = (user.name or user.email.split("@")[0]).split()[0].title()
+    org = Organization.objects.create(
+        name=f"{first}'s party", kind=OrgKind.PERSONAL, email_domain=""
+    )
     _set_company(user, org, ALL_PERMISSIONS)
     return org
 

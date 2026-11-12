@@ -4,32 +4,92 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from rest_framework.exceptions import ParseError, PermissionDenied
 
-from apps.accounts.models import User
-from apps.core import jobs, notify
+from apps.accounts.models import OrgKind, Permission, User
+from apps.core import jobs, notify, tenancy
 from apps.core.errors import Conflict
 from apps.lunches import board
-from apps.lunches.models import OrderItem, OrderSession, SessionStatus, SwiggyOrder
+from apps.lunches.models import (
+    OrderItem,
+    OrderSession,
+    SessionMember,
+    SessionStatus,
+    SwiggyOrder,
+)
 
 # How long picks stay open when a lunch is unlocked after its cutoff has passed.
 UNLOCK_GRACE = timedelta(minutes=30)
 
 
 def lunch_link(lunch: OrderSession) -> str:
-    # The web app opens the running lunch; signed-out people sign in first.
-    return f"{settings.APP_URL}/#/pick"
+    # Opens this lunch (joining it first if needed); signed-out people sign in first.
+    return f"{settings.APP_URL}/#/lunch/{lunch.id}"
 
 
-def start(host: User, cutoff_at, delivery_address: str) -> OrderSession:
+# A lunch runs from when it starts until its food arrives or it is called off.
+RUNNING = (
+    SessionStatus.OPEN,
+    SessionStatus.LOCKED,
+    SessionStatus.CONFIRMED,
+    SessionStatus.PLACED,
+)
+
+
+def _active(prefix: str = "") -> Q:
+    """A lunch that isn't over: running, or arrived but not yet closed by its host.
+
+    A lunch ends when the host finishes its last step ("Enjoy your meal"), which
+    closes it, or when it is called off before anything is ordered.
+    """
+    return Q(**{f"{prefix}status__in": RUNNING}) | Q(
+        **{
+            f"{prefix}status": SessionStatus.DELIVERED,
+            f"{prefix}closed_at__isnull": True,
+        }
+    )
+
+
+def running_party(user: User) -> OrderSession | None:
+    """The lunch a personal-party person hosts or joined that isn't over, if any.
+
+    Such a person is in one party at a time: to start their own they first finish the
+    one they host (or call it off), or leave the one they joined.
+    """
+    hosted = OrderSession.objects.filter(_active(), host=user).first()
+    if hosted is not None:
+        return hosted
+    joined = SessionMember.objects.filter(_active("session__"), user=user)
+    member = joined.select_related("session").first()
+    return member.session if member else None
+
+
+def ensure_free(user: User) -> None:
+    """Refuse a new party while this person is still in one."""
+    if busy := running_party(user):
+        what = "Finish" if busy.host_id == user.id else "Leave"
+        raise Conflict(
+            f"You're already in “{busy.name or 'a lunch'}”. {what} it first,"
+            " then start a new one."
+        )
+
+
+def start(host: User, cutoff_at, delivery_address: str, **extra) -> OrderSession:
+    """Start a lunch; `extra` is its name and where the address is, if given."""
     org_id = host.org_id
-    if org_id is None:  # views only let people with a company in
+    if org_id is None:  # views make a public-email host's party first
         raise Conflict("Set up or join your company first.")
+    if host.org and host.org.kind == OrgKind.PERSONAL:
+        ensure_free(host)
     lunch = OrderSession.objects.create(
         org_id=org_id,
         host=host,
         cutoff_at=cutoff_at,
         delivery_address=delivery_address,
+        **extra,
     )
     jobs.enqueue(
         "lock-lunch",
@@ -48,6 +108,61 @@ def start(host: User, cutoff_at, delivery_address: str) -> OrderSession:
         )
     )
     return lunch
+
+
+def join(user: User, lunch_id) -> OrderSession:
+    """Take part in a lunch from its link. Safe to repeat.
+
+    Your org's own lunch needs nothing. A personal party's lunch can be joined by anyone
+    with the link while picks are open; a company's lunch only by the company's people.
+    The lunch is read through `tenancy.joining`, which opens exactly this one lunch.
+    """
+    with tenancy.joining(lunch_id):
+        lunch = get_object_or_404(
+            OrderSession.objects.select_related("org"), id=lunch_id
+        )
+        if lunch.org_id == user.org_id:
+            if not user.has_perm(Permission.SESSION_READ):
+                raise PermissionDenied(
+                    f"You need the {Permission.SESSION_READ} permission to do this."
+                )
+            return lunch
+        if lunch.org.kind != OrgKind.PERSONAL:
+            raise PermissionDenied(
+                f"This lunch belongs to {lunch.org.name}. Only people from "
+                "that company can join it."
+            )
+        if SessionMember.objects.filter(session=lunch, user=user).exists():
+            return lunch
+        if lunch.status != SessionStatus.OPEN:
+            raise ParseError("This lunch has closed.")
+        SessionMember.objects.create(session=lunch, user=user, org_id=lunch.org_id)
+    return lunch
+
+
+def leave(lunch: OrderSession, user: User) -> None:
+    """Leave a party joined by its link; any picks are dropped.
+
+    The host closes their lunch instead, and a company's people can't leave their own
+    company's lunch. Once the order is under way, someone with dishes in it stays
+    until the food arrives, so the order never changes behind the host's back.
+    """
+    if lunch.org_id == user.org_id:
+        raise Conflict(
+            "You host this lunch. Close it instead."
+            if lunch.host_id == user.id
+            else "This is your company's lunch, so you can't leave it."
+        )
+    ordering = lunch.status in RUNNING and lunch.status != SessionStatus.OPEN
+    if ordering and lunch.items.filter(user=user).exists():
+        raise Conflict(
+            "Your food is already being ordered. You can leave once it arrives."
+        )
+    lunch.items.filter(user=user).delete()
+    lunch.skipped_by.remove(user)
+    lunch.completed_by.remove(user)
+    SessionMember.objects.filter(session=lunch, user=user).delete()
+    board.publish(lunch)
 
 
 def _ensure_open(lunch: OrderSession) -> None:
@@ -203,6 +318,19 @@ def unlock(lunch: OrderSession, cutoff_at=None) -> None:
         key=f"{lunch.id}-{lunch.cutoff_at:%Y%m%d%H%M}",
     )
     board.publish(lunch)
+
+
+def close(lunch: OrderSession) -> None:
+    """The host ends a lunch whose food has arrived. Safe to repeat.
+
+    Expects `lunch` locked with select_for_update.
+    """
+    if lunch.status != SessionStatus.DELIVERED:
+        raise Conflict("A lunch closes once its food has arrived.")
+    if lunch.closed_at is None:
+        lunch.closed_at = timezone.now()
+        lunch.save(update_fields=["closed_at", "updated_at"])
+        board.publish(lunch)
 
 
 def cancel(lunch: OrderSession) -> None:
