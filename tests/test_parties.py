@@ -776,3 +776,23 @@ def test_a_guest_cannot_close_the_hosts_lunch(party, guest):
     assert client_for(guest).post(
         f"/api/lunches/{party.lunch_id}/close"
     ).status_code in (403, 404)
+
+
+def test_an_offered_photo_with_spaces_is_kept_encoded(db):
+    photo = "https://media-assets.swiggy.com/x/1025860 (1).jpg"
+    offer = [{"id": "1", "name": "The samco", "photo": photo}]
+
+    response = start(person("hostc"), offered_restaurants=offer)
+
+    assert response.status_code == 201
+    saved = response.json()["offered_restaurants"][0]["photo"]
+    assert saved == "https://media-assets.swiggy.com/x/1025860%20(1).jpg"
+
+
+def test_an_unusable_photo_is_dropped_not_refused(db):
+    offer = [{"id": "1", "name": "Somewhere", "photo": "not a link"}]
+
+    response = start(person("hostd"), offered_restaurants=offer)
+
+    assert response.status_code == 201
+    assert response.json()["offered_restaurants"][0]["photo"] == ""

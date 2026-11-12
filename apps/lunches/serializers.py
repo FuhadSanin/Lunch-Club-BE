@@ -1,5 +1,8 @@
 from datetime import timedelta
+from urllib.parse import quote
 
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import URLValidator
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -29,7 +32,17 @@ class OfferedRestaurantSerializer(serializers.Serializer):
     rating = serializers.FloatField(min_value=0, max_value=5, required=False)
     eta = serializers.CharField(max_length=40, required=False, allow_blank=True)
     distance_km = serializers.FloatField(min_value=0, max_value=100, required=False)
-    photo = serializers.URLField(max_length=500, required=False, allow_blank=True)
+    # Swiggy image links can hold spaces ("_1025860 (1).jpg"): encode them, and if a
+    # link still isn't one, drop the photo rather than refuse the lunch over it.
+    photo = serializers.CharField(max_length=1000, required=False, allow_blank=True)
+
+    def validate_photo(self, value: str) -> str:
+        url = quote(value.strip(), safe=":/?#[]@!$&'()*+,;=%~")
+        try:
+            URLValidator(schemes=["http", "https"])(url)
+        except DjangoValidationError:
+            return ""
+        return url
 
 
 class StartLunchSerializer(serializers.ModelSerializer):
