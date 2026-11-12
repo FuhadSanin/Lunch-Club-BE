@@ -1,6 +1,13 @@
 from rest_framework import serializers
 
-from apps.accounts.models import Invite, OfficeAddress, Organization, Permission, User
+from apps.accounts.models import (
+    Invite,
+    Notification,
+    OfficeAddress,
+    Organization,
+    Permission,
+    User,
+)
 from apps.accounts.services import is_public_email
 
 
@@ -39,6 +46,24 @@ class PermissionsSerializer(serializers.Serializer):
 
     def validate_permissions(self, value: list[str]) -> list[str]:
         return sorted(set(value))
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    read = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Notification
+        fields = ["id", "title", "body", "link", "read", "created_at"]
+
+    def get_read(self, notification: Notification) -> bool:
+        return notification.read_at is not None
+
+
+class MarkReadSerializer(serializers.Serializer):
+    # Omit `ids` to mark everything read.
+    ids = serializers.ListField(
+        child=serializers.UUIDField(), required=False, max_length=200
+    )
 
 
 class PushTokenSerializer(serializers.Serializer):

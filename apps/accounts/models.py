@@ -202,3 +202,45 @@ class Invite(BaseModel):
 
     def __str__(self) -> str:
         return self.email
+
+
+class DeviceToken(BaseModel):
+    """A browser that turned on notifications (its Firebase Cloud Messaging token).
+
+    Kept so a device can be subscribed to a lunch's notifications when its person
+    joins that lunch, not only when they first turn notifications on.
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="devices")
+    token = models.CharField(max_length=4096, unique=True)
+
+    class Meta:
+        db_table = "device_tokens"
+
+    def __str__(self) -> str:
+        return f"{self.user_id} {self.token[:12]}"
+
+
+class Notification(BaseModel):
+    """Something a person was told about a lunch, kept so they can read it later.
+
+    The bell in the web app lists these; the push (see apps.core.notify) is the same
+    message arriving while the app is closed.
+    """
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="notifications"
+    )
+    title = models.CharField(max_length=200)
+    body = models.CharField(max_length=400, blank=True)
+    link = models.CharField(max_length=500, blank=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "notifications"
+        indexes = [
+            models.Index(fields=["user", "-created_at"], name="notifications_recent")
+        ]
+
+    def __str__(self) -> str:
+        return self.title

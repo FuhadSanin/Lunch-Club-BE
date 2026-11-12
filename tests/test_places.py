@@ -47,6 +47,13 @@ NOMINATIM = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def fresh_cache():
+    cache.clear()
+    yield
+    cache.clear()
+
+
 @pytest.fixture
 def osm(monkeypatch):
     """Stand in for Photon and Nominatim; `osm.calls` lists the requests made."""
@@ -78,6 +85,8 @@ def test_typing_an_address_suggests_places(company, member, osm):
             "description": "Infopark Kochi, Edachira, Ernakulam, Kerala",
             "main_text": "Infopark Kochi",
             "secondary_text": "Edachira, Ernakulam, Kerala",
+            "lat": 10.0105236,
+            "lng": 76.3628106,
         },
         {
             "place_id": "N9399375060",
@@ -88,6 +97,8 @@ def test_typing_an_address_suggests_places(company, member, osm):
             "secondary_text": (
                 "Kakkanad-InfoPark-Karimugal Road, Ernakulam, Kerala, 682042"
             ),
+            "lat": 10.0152584,
+            "lng": 76.3635168,
         },
     ]
 
@@ -206,3 +217,130 @@ def test_a_company_person_without_a_company_cannot_search_places(db, osm):
 
 def test_places_need_sign_in(client):
     assert client.get("/api/places", {"q": "infopark"}).status_code == 401
+
+
+OPEN_METEO = {
+    "results": [
+        {
+            "id": 11073561,
+            "name": "Kakkanad",
+            "latitude": 10.01636,
+            "longitude": 76.34168,
+            "admin1": "Kerala",
+            "admin2": "Ernakulam District",
+            "admin3": "Kanayannur",
+        },
+        {"id": "bad", "name": "Broken"},
+    ]
+}
+GEOAPIFY = {
+    "results": [
+        {
+            "place_id": "abc123",
+            "formatted": "Infopark, Kakkanad, Kochi, Kerala, India",
+            "address_line1": "Infopark",
+            "address_line2": "Kakkanad, Kochi, Kerala, India",
+            "lat": 10.0152,
+            "lon": 76.3635,
+        },
+        {"place_id": "nope"},
+    ]
+}
+
+
+def serve(monkeypatch, **hosts):
+    """Answer by host: a JSON body, or an int status; anything unlisted is a 503."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        for host, answer in hosts.items():
+            if host in request.url.host:
+                if isinstance(answer, int):
+                    return httpx.Response(answer)
+                return httpx.Response(200, json=answer)
+        return httpx.Response(503)
+
+    monkeypatch.setattr(places, "transport", httpx.MockTransport(handler))
+    return calls
+
+
+def test_when_photon_is_down_towns_still_come_from_open_meteo(member, monkeypatch):
+    calls = serve(monkeypatch, photon=503, **{"open-meteo": OPEN_METEO})
+
+    response = client_for(member).get("/api/places", {"q": "kakkanad"})
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "place_id": "M11073561",
+            "description": "Kakkanad, Kanayannur, Ernakulam District, Kerala",
+            "main_text": "Kakkanad",
+            "secondary_text": "Kanayannur, Ernakulam District, Kerala",
+            "lat": 10.01636,
+            "lng": 76.34168,
+        }
+    ]
+    assert [c.url.host for c in calls][0].startswith("photon")
+
+
+def test_a_provider_that_failed_is_skipped_for_a_while(member, monkeypatch):
+    calls = serve(monkeypatch, photon=503, **{"open-meteo": OPEN_METEO})
+    client = client_for(member)
+
+    client.get("/api/places", {"q": "kakkanad"})
+    client.get("/api/places", {"q": "kakkanadu"})
+
+    assert [c.url.host for c in calls].count("photon.komoot.io") == 1
+
+
+def test_a_geoapify_key_makes_it_the_first_choice(member, monkeypatch, settings):
+    settings.GEOAPIFY_API_KEY = "key-1"
+    calls = serve(monkeypatch, geoapify=GEOAPIFY)
+
+    response = client_for(member).get(
+        "/api/places", {"q": "infopark", "lat": 10.0, "lng": 76.3}
+    )
+
+    assert response.json() == [
+        {
+            "place_id": "abc123",
+            "description": "Infopark, Kakkanad, Kochi, Kerala, India",
+            "main_text": "Infopark",
+            "secondary_text": "Kakkanad, Kochi, Kerala, India",
+            "lat": 10.0152,
+            "lng": 76.3635,
+        }
+    ]
+    params = calls[0].url.params
+    assert params["apiKey"] == "key-1"
+    assert params["bias"] == "proximity:76.3,10.0"
+    assert params["filter"] == "countrycode:in"
+
+
+def test_geoapify_failing_falls_back_to_the_free_services(
+    member, monkeypatch, settings
+):
+    settings.GEOAPIFY_API_KEY = "key-1"
+    serve(monkeypatch, geoapify=401, photon=PHOTON)
+
+    response = client_for(member).get("/api/places", {"q": "infopark"})
+
+    assert response.status_code == 200
+    assert response.json()[0]["place_id"] == "W731817480"
+
+
+def test_a_place_from_another_provider_is_chosen_without_a_second_call(
+    member, monkeypatch
+):
+    calls = serve(monkeypatch, photon=503, **{"open-meteo": OPEN_METEO})
+    client = client_for(member)
+    client.get("/api/places", {"q": "kakkanad"})
+    made = len(calls)
+
+    chosen = client.get("/api/places/M11073561")
+
+    assert chosen.status_code == 200
+    assert chosen.json()["lat"] == 10.01636
+    assert len(calls) == made
+    assert client.get("/api/places/M999").status_code == 404  # not one we suggested

@@ -134,6 +134,9 @@ TASKS_BASE_URL = env("TASKS_BASE_URL", "")
 TASKS_SERVICE_ACCOUNT = env("TASKS_SERVICE_ACCOUNT", "")
 FIRESTORE_ENABLED = env_bool("FIRESTORE_ENABLED")
 PUSH_ENABLED = env_bool("PUSH_ENABLED")
+# A Firebase service-account key (the JSON itself) for sending push where the host has
+# no service account of its own, like Vercel. Keep it in a secret, never in git.
+FIREBASE_CREDENTIALS_JSON = env("FIREBASE_CREDENTIALS_JSON", "")
 
 # Web app address, used for links in notifications.
 APP_URL = env("APP_URL", "http://localhost:5173")
@@ -212,5 +215,14 @@ PLACES_SUGGEST_URL = env("PLACES_SUGGEST_URL", "https://photon.komoot.io/api/")
 PLACES_LOOKUP_URL = env(
     "PLACES_LOOKUP_URL", "https://nominatim.openstreetmap.org/lookup"
 )
+# Place search tries these in order: Geoapify (a free key from geoapify.com; the
+# reliable one), then Photon (OpenStreetMap: free, not always up), then Open-Meteo
+# (towns and areas only).
+GEOAPIFY_API_KEY = env("GEOAPIFY_API_KEY", "")
+GEOAPIFY_URL = env("GEOAPIFY_URL", "https://api.geoapify.com/v1/geocode/autocomplete")
+PLACES_FALLBACK_URL = env(
+    "PLACES_FALLBACK_URL", "https://geocoding-api.open-meteo.com/v1/search"
+)
+PLACES_TIMEOUT_SECONDS = float(env("PLACES_TIMEOUT_SECONDS", "4"))
 PLACES_USER_AGENT = env("PLACES_USER_AGENT", "lunch-backend/1.0 (group lunch app)")
 PLACES_CACHE_SECONDS = int(env("PLACES_CACHE_SECONDS", "86400"))

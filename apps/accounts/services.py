@@ -15,6 +15,7 @@ from rest_framework.exceptions import (
 from apps.accounts.models import (
     ALL_PERMISSIONS,
     MEMBER_PERMISSIONS,
+    DeviceToken,
     Invite,
     Organization,
     OrgKind,
@@ -232,3 +233,31 @@ def _set_claims(firebase_uid: str, claims: dict) -> None:
     from apps.core import firebase
 
     auth.set_custom_user_claims(firebase_uid, claims, app=firebase.app())
+
+
+def _personal_party_id(user: User) -> UUID | None:
+    """The personal-party lunch this person is in, if any (whose topic they hear)."""
+    from apps.lunches import services as lunches  # lunches builds on accounts
+
+    party = lunches.running_party(user)
+    if party is not None and party.org.kind == OrgKind.PERSONAL:
+        return party.id
+    return None
+
+
+def subscribe_device(user: User, token: str) -> None:
+    """Remember a device and subscribe it to what its person should hear."""
+    DeviceToken.objects.update_or_create(token=token, defaults={"user": user})
+    if user.org_id and user.org and user.org.kind == OrgKind.COMPANY:
+        notify.subscribe_to_company(token, user.org_id)
+    if party_id := _personal_party_id(user):
+        notify.subscribe_to_lunch([token], party_id)
+
+
+def unsubscribe_device(user: User, token: str) -> None:
+    """Stop notifications on a device: forget it and leave the topics it joined."""
+    DeviceToken.objects.filter(user=user, token=token).delete()
+    if user.org_id and user.org and user.org.kind == OrgKind.COMPANY:
+        notify.unsubscribe_from_company([token], user.org_id)
+    if party_id := _personal_party_id(user):
+        notify.unsubscribe_from_lunch([token], party_id)

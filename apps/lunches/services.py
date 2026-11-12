@@ -1,15 +1,16 @@
 """The group lunch: start it, collect everyone's picks, lock them at the cutoff."""
 
 from datetime import timedelta
+from functools import partial
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, QuerySet
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework.exceptions import ParseError, PermissionDenied
 
-from apps.accounts.models import OrgKind, Permission, User
+from apps.accounts.models import Notification, OrgKind, Permission, User
 from apps.core import jobs, notify, tenancy
 from apps.core.errors import Conflict
 from apps.lunches import board
@@ -51,6 +52,91 @@ def _active(prefix: str = "") -> Q:
             f"{prefix}closed_at__isnull": True,
         }
     )
+
+
+def participants(lunch: OrderSession) -> QuerySet[User]:
+    """Everyone in a lunch: its company, or a personal party's host and guests."""
+    if lunch.org.kind == OrgKind.PERSONAL:
+        guests = SessionMember.objects.filter(session=lunch).values("user_id")
+        return User.objects.filter(Q(id=lunch.host_id) | Q(id__in=guests))
+    return User.objects.filter(org_id=lunch.org_id)
+
+
+def tell_participants(
+    lunch: OrderSession, title: str, body: str, skip: User | None = None
+) -> None:
+    """Tell everyone in a lunch (but `skip`, who just did it): a line in each person's
+    bell now, in the same transaction as the change, and a push once it commits.
+    """
+    link = lunch_link(lunch)
+    people = participants(lunch)
+    if skip is not None:
+        people = people.exclude(id=skip.id)
+    Notification.objects.bulk_create(
+        [Notification(user=p, title=title, body=body, link=link) for p in people]
+    )
+    if lunch.org.kind == OrgKind.PERSONAL:
+        send = partial(notify.push_to_lunch, lunch.id, title, body, link)
+    else:
+        send = partial(notify.push_to_company, lunch.org_id, title, body, link)
+    transaction.on_commit(send)
+
+
+# What the host is told about (nobody else is notified): someone joins their party,
+# someone completes their order, and everyone is done picking.
+
+
+def _tell_host(lunch: OrderSession, title: str, body: str) -> None:
+    """A line in the host's bell now, and a push to the host's own devices on commit."""
+    link = lunch_link(lunch)
+    Notification.objects.create(user=lunch.host, title=title, body=body, link=link)
+    tokens = list(lunch.host.devices.values_list("token", flat=True))
+    transaction.on_commit(partial(notify.push_to_devices, tokens, title, body, link))
+
+
+def _name(user: User) -> str:
+    return user.name or user.email
+
+
+def tell_host_someone_joined(lunch: OrderSession, guest: User) -> None:
+    count = participants(lunch).count()
+    where = f"“{lunch.name}” has" if lunch.name else "Your lunch has"
+    _tell_host(
+        lunch,
+        f"{_name(guest)} joined your party",
+        f"{where} {count} {'person' if count == 1 else 'people'} now.",
+    )
+
+
+def _after_finishing(lunch: OrderSession, user: User, *, was_done: bool) -> None:
+    """Someone's picks just became final (completed, or skipped): tell the host who
+    completed an order, and once, when that made everyone done."""
+    if was_done:
+        return
+    everyone = participants(lunch)
+    total = everyone.count()
+    done = lunch.completed_by.filter(id__in=everyone.values("id")).count()
+    skipped = lunch.skipped_by.filter(id=user.id).exists()
+    if user.id != lunch.host_id and not skipped:
+        _tell_host(
+            lunch,
+            f"{_name(user)} completed their order",
+            f"{done} of {total} have picked.",
+        )
+    if total and done == total:
+        _tell_host(
+            lunch,
+            "Everyone has picked",
+            f"All {total} are in. Review the cart and lock the picks.",
+        )
+
+
+def subscribe_devices(user: User, lunch: OrderSession) -> None:
+    """Have this person's devices hear a personal party's lunch (after commit)."""
+    tokens = list(user.devices.values_list("token", flat=True))
+    if tokens and lunch.org.kind == OrgKind.PERSONAL:
+        lunch_id = lunch.id
+        transaction.on_commit(lambda: notify.subscribe_to_lunch(tokens, lunch_id))
 
 
 def running_party(user: User) -> OrderSession | None:
@@ -98,15 +184,8 @@ def start(host: User, cutoff_at, delivery_address: str, **extra) -> OrderSession
         key=str(lunch.id),
     )
     board.publish(lunch)
-    cutoff = timezone.localtime(cutoff_at).strftime("%I:%M %p").lstrip("0")
-    transaction.on_commit(
-        lambda: notify.push_to_company(
-            org_id,
-            f"{host.name or 'Your host'} started a lunch",
-            f"Pick your food by {cutoff}.",
-            lunch_link(lunch),
-        )
-    )
+    # No notification for a new lunch: people are only told when someone joins a party.
+    subscribe_devices(host, lunch)
     return lunch
 
 
@@ -137,6 +216,8 @@ def join(user: User, lunch_id) -> OrderSession:
         if lunch.status != SessionStatus.OPEN:
             raise ParseError("This lunch has closed.")
         SessionMember.objects.create(session=lunch, user=user, org_id=lunch.org_id)
+        subscribe_devices(user, lunch)
+        tell_host_someone_joined(lunch, user)
     return lunch
 
 
@@ -204,9 +285,11 @@ def remove_item(lunch: OrderSession, item: OrderItem) -> None:
 def skip(lunch: OrderSession, user: User) -> None:
     """Sit this lunch out; any picks are dropped. Final, like completing an order."""
     _ensure_editable(lunch, user)
+    was_done = lunch.completed_by.filter(id=user.id).exists()
     lunch.items.filter(user=user).delete()
     lunch.skipped_by.add(user)
     lunch.completed_by.add(user)
+    _after_finishing(lunch, user, was_done=was_done)
     board.publish(lunch)
 
 
@@ -232,7 +315,9 @@ def replace_picks(
     )
     lunch.skipped_by.remove(user)
     if complete:
+        was_done = lunch.completed_by.filter(id=user.id).exists()
         lunch.completed_by.add(user)
+        _after_finishing(lunch, user, was_done=was_done)
     board.publish(lunch)
 
 
@@ -241,7 +326,9 @@ def complete(lunch: OrderSession, user: User) -> None:
     _ensure_open(lunch)
     if not lunch.items.filter(user=user).exists():
         raise Conflict("Pick a dish first, or skip today.")
+    was_done = lunch.completed_by.filter(id=user.id).exists()
     lunch.completed_by.add(user)
+    _after_finishing(lunch, user, was_done=was_done)
     board.publish(lunch)
 
 

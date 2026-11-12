@@ -1,23 +1,33 @@
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts import services
-from apps.accounts.models import Invite, OfficeAddress, Organization, Permission, User
+from apps.accounts.models import (
+    Invite,
+    Notification,
+    OfficeAddress,
+    Organization,
+    Permission,
+    User,
+)
 from apps.accounts.permissions import CompanyAPIView
 from apps.accounts.serializers import (
     CompanySettingsSerializer,
     InviteRequestSerializer,
     InviteSerializer,
+    MarkReadSerializer,
     MeSerializer,
+    NotificationSerializer,
     OfficeAddressSerializer,
     OrganizationSerializer,
     PermissionsSerializer,
     PushTokenSerializer,
     UserSerializer,
 )
-from apps.core import notify
+from apps.core import tenancy
 
 
 class MeView(APIView):
@@ -39,17 +49,57 @@ class CompanyView(APIView):
         )
 
 
-class PushTokenView(CompanyAPIView):
-    """POST /api/me/push-token: get this device's lunch notifications."""
+class PushTokenView(APIView):
+    """POST /api/me/push-token: get this device's lunch notifications.
+    DELETE: stop them on this device.
 
-    required_permissions = {"POST": None}  # your own device
+    For anyone signed in, in a company or not: the device hears its company, and the
+    lunches of any personal party the person is in.
+    """
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        tenancy.activate(request.user.org_id, request.user.id)
 
     def post(self, request):
         serializer = PushTokenSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        notify.subscribe_to_company(
-            serializer.validated_data["token"], request.user.org_id
+        services.subscribe_device(request.user, serializer.validated_data["token"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def delete(self, request):
+        serializer = PushTokenSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.unsubscribe_device(request.user, serializer.validated_data["token"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class NotificationsView(APIView):
+    """GET /api/notifications: what you were told lately, newest first.
+
+    For anyone signed in, in a company or not.
+    """
+
+    def get(self, request):
+        mine = Notification.objects.filter(user=request.user)
+        return Response(
+            {
+                "unread": mine.filter(read_at__isnull=True).count(),
+                "items": NotificationSerializer(mine[:30], many=True).data,
+            }
         )
+
+
+class NotificationsReadView(APIView):
+    """POST /api/notifications/read: mark some (`ids`) or all as read."""
+
+    def post(self, request):
+        serializer = MarkReadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        unread = Notification.objects.filter(user=request.user, read_at__isnull=True)
+        if "ids" in serializer.validated_data:
+            unread = unread.filter(id__in=serializer.validated_data["ids"])
+        unread.update(read_at=timezone.now())
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

@@ -15,7 +15,7 @@ CHECK_ENV := DJANGO_SETTINGS_MODULE=config.test_settings DEV_AUTH_EMAIL=
 PROD_ENV := DJANGO_DEBUG=false DEV_AUTH_EMAIL= DJANGO_SECRET_KEY=$$(openssl rand -base64 48)
 
 .PHONY: help build image up down logs migrate shell lint format typecheck check \
-	security test ci hooks
+	security test ci hooks ready
 
 help: ## List the commands
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-10s %s\n", $$1, $$2}'
@@ -82,3 +82,6 @@ ci: lint typecheck check security test ## Everything CI runs
 
 hooks: ## Install the git hooks that run these checks on every commit
 	uv run pre-commit install
+
+ready: ## Check, before committing, everything the commit hook will check
+	@scripts/ready.sh

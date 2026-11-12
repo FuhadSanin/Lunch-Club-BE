@@ -14,7 +14,6 @@ from datetime import timedelta
 from uuid import UUID
 
 from django.conf import settings
-from django.db import transaction
 from django.utils import timezone
 
 from apps.core import jobs, notify, tenancy
@@ -326,22 +325,14 @@ def _refresh_lunch_status(lunch: OrderSession) -> None:
     statuses = set(lunch.orders.values_list("status", flat=True))
     new_status: str
     if statuses == {OrderStatus.DELIVERED}:
-        new_status, title, body = (
-            SessionStatus.DELIVERED,
-            "Lunch has arrived",
-            "Collect your food from the host.",
-        )
+        new_status = SessionStatus.DELIVERED
     elif statuses <= {OrderStatus.PLACED, OrderStatus.DELIVERED}:
-        new_status, title, body = (
-            SessionStatus.PLACED,
-            "Lunch is ordered",
-            "Swiggy is preparing your food.",
-        )
+        new_status = SessionStatus.PLACED
     else:
         new_status = lunch.status
     if new_status != lunch.status:
         lunch.status = new_status
         lunch.save(update_fields=["status", "updated_at"])
-        org_id, link = lunch.org_id, lunch_link(lunch)
-        transaction.on_commit(lambda: notify.push_to_company(org_id, title, body, link))
+        # Ordered and arrived show on the board; people are only notified when someone
+        # joins a party (lunches.services.tell_host_someone_joined).
     board.publish(lunch)
