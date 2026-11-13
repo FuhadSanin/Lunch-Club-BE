@@ -102,7 +102,8 @@ def test_without_automatic_ordering_the_host_is_asked_to_finish(
 
     order = SwiggyOrder.objects.get()
     assert order.status == OrderStatus.NEEDS_HOST
-    assert "Swiggy order number" in order.last_error
+    assert "waiting for Swiggy approval" in order.last_error
+    assert "mark it as ordered" in order.last_error
     assert any(host.email in message.to for message in mail.outbox)
     get_provider.cache_clear()
 

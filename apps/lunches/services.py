@@ -218,6 +218,7 @@ def join(user: User, lunch_id) -> OrderSession:
         SessionMember.objects.create(session=lunch, user=user, org_id=lunch.org_id)
         subscribe_devices(user, lunch)
         tell_host_someone_joined(lunch, user)
+        board.publish(lunch)  # everyone's board shows the new person at once
     return lunch
 
 

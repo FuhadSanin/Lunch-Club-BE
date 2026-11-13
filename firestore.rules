@@ -1,0 +1,21 @@
+rules_version = '2';
+
+// The live board (apps/lunches/board.py): a read-only copy of each lunch that browsers
+// listen to. Only the server writes it (with the Admin SDK, which skips these rules).
+// A board can be read by the lunch's company (the org_id claim set in
+// apps/accounts/services.py) and by the host and guests of a personal party, whose
+// Firebase uids the server lists in member_uids.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /boards/{lunchId} {
+      allow read: if request.auth != null && (
+        request.auth.uid in resource.data.member_uids ||
+        request.auth.token.get('org_id', '') == resource.data.org_id
+      );
+      allow write: if false;
+    }
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

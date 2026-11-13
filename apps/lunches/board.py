@@ -10,9 +10,11 @@ from uuid import UUID
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 
+from apps.accounts.models import User
 from apps.core import tenancy
-from apps.lunches.models import OrderSession
+from apps.lunches.models import OrderSession, SessionMember
 from apps.lunches.queries import with_board
 from apps.lunches.serializers import LunchDetailSerializer
 
@@ -26,6 +28,15 @@ def publish(lunch: OrderSession) -> None:
         transaction.on_commit(lambda: _write(org_id, lunch_id))
 
 
+def member_uids(lunch: OrderSession) -> list[str]:
+    """Who may listen to the board besides its company (see firestore.rules): the host
+    and everyone who joined by the link. A personal party's guests come from other
+    orgs, so the company check alone would shut them out."""
+    guests = SessionMember.objects.filter(session=lunch).values("user_id")
+    people = User.objects.filter(Q(id=lunch.host_id) | Q(id__in=guests))
+    return sorted(people.values_list("firebase_uid", flat=True))
+
+
 def _write(org_id: UUID, lunch_id: UUID) -> None:
     from firebase_admin import firestore
 
@@ -33,7 +44,11 @@ def _write(org_id: UUID, lunch_id: UUID) -> None:
 
     with tenancy.scoped(org_id):
         lunch = with_board(OrderSession.objects.filter(id=lunch_id)).get()
-        board = {**LunchDetailSerializer(lunch).data, "org_id": str(org_id)}
+        board = {
+            **LunchDetailSerializer(lunch).data,
+            "org_id": str(org_id),
+            "member_uids": member_uids(lunch),
+        }
     try:
         firestore.client(app=firebase.app()).collection("boards").document(
             str(lunch_id)

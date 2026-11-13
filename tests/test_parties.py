@@ -796,3 +796,42 @@ def test_an_unusable_photo_is_dropped_not_refused(db):
 
     assert response.status_code == 201
     assert response.json()["offered_restaurants"][0]["photo"] == ""
+
+
+# --- the live board -------------------------------------------------------------
+
+
+def test_a_guest_joining_writes_the_live_board_with_who_may_read_it(
+    party, settings, monkeypatch, django_capture_on_commit_callbacks
+):
+    from firebase_admin import firestore
+
+    from apps.core import firebase
+
+    settings.FIRESTORE_ENABLED = True
+    written = {}
+
+    class Doc:
+        def __init__(self, key):
+            self.key = key
+
+        def set(self, data):
+            written[self.key] = data
+
+    class Client:
+        def collection(self, name):
+            return self
+
+        def document(self, key):
+            return Doc(key)
+
+    monkeypatch.setattr(firebase, "app", lambda: "app")
+    monkeypatch.setattr(firestore, "client", lambda app: Client())
+    guest = person("guest")
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert join(guest, party.lunch_id).status_code == 200
+
+    board = written[party.lunch_id]
+    assert board["member_uids"] == sorted([party.host.firebase_uid, guest.firebase_uid])
+    assert guest.email in [p["email"] for p in board["people"]]
