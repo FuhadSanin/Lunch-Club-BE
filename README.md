@@ -220,6 +220,12 @@ Connect to an AI assistant (they appear in its list under the app's name, with a
 button). Signing in is the only way to connect: there are no tokens to make or copy. Only a
 token's SHA-256 is stored.
 
+**On Vercel, with the API (the setup in use).** `config/mcp_mount.py` serves `/mcp` and
+`/.well-known/oauth-protected-resource` from the API's own WSGI app, so there is no second service. The web
+app forwards its own `/mcp` to the API (`lunch-board/vercel.json`), so people and assistants only see
+`https://<web>/mcp`. Needs `API_PUBLIC_URL` (the API's address) and `APP_URL` (the web app) set on the API's
+project; the server is the same code as below, started for each request (it keeps no state).
+
 **Run it** (needs `uv sync --group mcp`; the web link and API come from environment
 variables):
 

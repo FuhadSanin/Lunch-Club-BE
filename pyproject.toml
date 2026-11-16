@@ -13,6 +13,8 @@ dependencies = [
     "google-auth>=2.40",
     "sentry-sdk[django]>=2.30",
     "httpx>=0.28,<1",
+    "mcp>=1.25",  # /mcp, the AI assistant server, runs inside the API (config/mcp_mount.py)
+    "a2wsgi>=1.10",
 ]
 
 [dependency-groups]
