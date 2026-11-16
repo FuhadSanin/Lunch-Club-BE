@@ -4,9 +4,11 @@ import pytest
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from apps.accounts import rbac
 from apps.accounts.models import (
     ALL_PERMISSIONS,
     MEMBER_PERMISSIONS,
+    Address,
     Organization,
     Permission,
     User,
@@ -35,14 +37,17 @@ HOST_PERMISSIONS = MEMBER_PERMISSIONS | {
 
 
 def make_user(org, name, permissions=MEMBER_PERMISSIONS):
+    """A person in `org`, with a role that grants exactly `permissions`."""
     domain = org.email_domain if org else "gmail.com"
-    return User.objects.create(
+    user = User.objects.create(
         org=org,
         name=name,
         email=f"{name.lower()}@{domain}",
         firebase_uid=f"uid-{name}",
-        permissions=sorted(permissions) if org else [],
     )
+    if org and permissions:
+        rbac.give_role(user, rbac.role_by_permissions(org, permissions))
+    return user
 
 
 @pytest.fixture
@@ -72,7 +77,9 @@ def lunch(host):
         org=host.org,
         host=host,
         cutoff_at=timezone.now() + timedelta(hours=1),
-        delivery_address="Acme office, 4th floor",
+        address=Address.objects.create(
+            org=host.org, address="Acme office, 4th floor", saved=False
+        ),
     )
 
 

@@ -9,6 +9,7 @@ A suggestion's `place_id` is OpenStreetMap's own, like `W731817480` (a way) or `
 """
 
 import re
+import threading
 from typing import Any
 
 import httpx
@@ -24,23 +25,39 @@ MAX_SUGGESTIONS = 8
 # Tests swap this for an httpx.MockTransport.
 transport: httpx.BaseTransport | None = None
 
+# One client for every request: it keeps its connections to the place services open,
+# so a suggestion doesn't pay for a new TCP and TLS handshake each time (about half of
+# the wait on a far-away server). A dead server is given up on after CONNECT_SECONDS.
+CONNECT_SECONDS = 2.0
+_shared: tuple[httpx.BaseTransport | None, httpx.Client] | None = None
+_shared_lock = threading.Lock()
+
 
 class PlacesError(Exception):
     """The place service didn't answer, or answered with something we can't read."""
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(
-        headers={"User-Agent": settings.PLACES_USER_AGENT, "Accept-Language": "en"},
-        timeout=settings.PLACES_TIMEOUT_SECONDS,
-        transport=transport,
-    )
+    global _shared  # noqa: PLW0603
+    with _shared_lock:
+        if _shared is None or _shared[0] is not transport:
+            timeout = settings.PLACES_TIMEOUT_SECONDS
+            client = httpx.Client(
+                headers={
+                    "User-Agent": settings.PLACES_USER_AGENT,
+                    "Accept-Language": "en",
+                },
+                timeout=httpx.Timeout(timeout, connect=min(CONNECT_SECONDS, timeout)),
+                limits=httpx.Limits(max_keepalive_connections=8, keepalive_expiry=60),
+                transport=transport,
+            )
+            _shared = (transport, client)
+        return _shared[1]
 
 
 def _get(url: str, params: dict) -> Any:
     try:
-        with _client() as client:
-            response = client.get(url, params=params)
+        response = _client().get(url, params=params)
     except httpx.HTTPError as error:
         raise PlacesError(f"Couldn't reach the place search: {error}") from error
     if response.status_code >= 400:
@@ -210,9 +227,14 @@ def suggest(
             if all(item["place_id"] != f["place_id"] for f in found):
                 found.append(item)
         found = found[:MAX_SUGGESTIONS]
-        for item in found:  # so choosing one needs no second call
-            cache.set(f"places:detail:{item['place_id']}", _detail(item), _ttl())
-        cache.set(key, found, _ttl())
+        # So choosing one needs no second call.
+        cache.set_many(
+            {
+                **{f"places:detail:{i['place_id']}": _detail(i) for i in found},
+                key: found,
+            },
+            _ttl(),
+        )
     return found
 
 

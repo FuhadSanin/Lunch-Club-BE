@@ -1,6 +1,7 @@
 from django.db import connection
 from django.utils import timezone
 
+from apps.accounts.models import Address
 from apps.core import tenancy
 from apps.lunches.models import OrderSession
 from tests.conftest import client_for, make_user
@@ -24,7 +25,7 @@ def test_database_shows_only_the_active_companys_lunches(company, other_company)
             org=org,
             host=make_user(org, f"Host{org.name}"),
             cutoff_at=timezone.now(),
-            delivery_address="Somewhere",
+            address=Address.objects.create(org=org, address="Somewhere"),
         )
 
     with connection.cursor() as cursor:

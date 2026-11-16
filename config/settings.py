@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "apps.core",
     "apps.accounts",
+    "apps.oauth",
     "apps.lunches",
     "apps.ordering",
     "apps.catalog",
@@ -85,13 +86,52 @@ USE_TZ = True
 TIME_ZONE = "Asia/Kolkata"
 LANGUAGE_CODE = "en-in"
 
-AUTHENTICATION_CLASSES = ["apps.accounts.auth.FirebaseAuthentication"]
+AUTHENTICATION_CLASSES = [
+    "apps.accounts.auth.ApiTokenAuthentication",
+    "apps.accounts.auth.FirebaseAuthentication",
+]
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": AUTHENTICATION_CLASSES,
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],
     "UNAUTHENTICATED_USER": None,
+    # Every error is a sentence a person can act on (see apps.core.errors).
+    "EXCEPTION_HANDLER": "apps.core.errors.exception_handler",
+    # Per signed-in person. An endpoint with its own, tighter limit names a
+    # `throttle_scope` (places and restaurants call outside services whose quotas and
+    # patience are limited).
+    "DEFAULT_THROTTLE_CLASSES": [
+        "apps.core.throttling.UserThrottle",
+        "apps.core.throttling.ScopedThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "user": env("THROTTLE_USER", "600/min"),
+        "catalog": env("THROTTLE_CATALOG", "60/min"),
+        "places": env("THROTTLE_PLACES", "60/min"),
+        "join": env("THROTTLE_JOIN", "20/min"),
+        # by address, for the sign-in endpoints anyone can reach
+        "oauth_register": env("THROTTLE_OAUTH_REGISTER", "20/hour"),
+        "oauth_authorize": env("THROTTLE_OAUTH_AUTHORIZE", "60/min"),
+        "oauth_token": env("THROTTLE_OAUTH_TOKEN", "60/min"),
+    },
+}
+
+# Rate-limit counters. In memory is enough on one server; with several (serverless), set
+# THROTTLE_CACHE=database so they share one count (the table comes from a migration).
+CACHES = {
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
+    "throttle": (
+        {
+            "BACKEND": "apps.core.throttling.FailOpenDatabaseCache",
+            "LOCATION": "django_throttle_cache",
+        }
+        if env("THROTTLE_CACHE", "memory") == "database"
+        else {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "throttle",
+        }
+    ),
 }
 
 # Local development only: requests without a token act as this person
@@ -133,6 +173,10 @@ TASKS_BASE_URL = env("TASKS_BASE_URL", "")
 # Service account that Cloud Tasks signs its OIDC tokens with.
 TASKS_SERVICE_ACCOUNT = env("TASKS_SERVICE_ACCOUNT", "")
 FIRESTORE_ENABLED = env_bool("FIRESTORE_ENABLED")
+# Refuse to run when the database role can skip row-level security (a superuser, or
+# Neon's default owner). Turn on once DATABASE_URL uses the role `manage.py
+# create_app_role` makes.
+REQUIRE_RLS = env_bool("REQUIRE_RLS")
 PUSH_ENABLED = env_bool("PUSH_ENABLED")
 # A Firebase service-account key (the JSON itself) for sending push where the host has
 # no service account of its own, like Vercel. Keep it in a secret, never in git.
@@ -140,6 +184,15 @@ FIREBASE_CREDENTIALS_JSON = env("FIREBASE_CREDENTIALS_JSON", "")
 
 # Web app address, used for links in notifications.
 APP_URL = env("APP_URL", "http://localhost:5173")
+# This API's own public address: the "issuer" assistants find in its sign-in metadata.
+# Empty: taken from the request.
+API_PUBLIC_URL = env("API_PUBLIC_URL", "")
+
+# Signing in assistants (apps/oauth): how long each piece lives.
+OAUTH_ACCESS_TOKEN_SECONDS = int(env("OAUTH_ACCESS_TOKEN_SECONDS", "3600"))
+OAUTH_REFRESH_TOKEN_DAYS = int(env("OAUTH_REFRESH_TOKEN_DAYS", "30"))
+OAUTH_REQUEST_MINUTES = int(env("OAUTH_REQUEST_MINUTES", "10"))
+OAUTH_CODE_SECONDS = int(env("OAUTH_CODE_SECONDS", "120"))
 
 # --- Ordering ----------------------------------------------------------------
 # Swiggy's multi-restaurant checkout takes at most this many restaurants per order.

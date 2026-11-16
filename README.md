@@ -13,8 +13,8 @@ The order bot is the next change: [`openspec/changes/add-swiggy-order-bot`](open
 ```
 config/          settings (environment variables only), URLs, WSGI
 apps/core/       base model, background jobs, company scoping (RLS), notifications, JSON logs
-apps/accounts/   companies, people, Firebase sign-in, roles
-apps/lunches/    lunches, picks, skips, locking, live board
+apps/accounts/   companies, people, Firebase sign-in, roles and permissions, addresses
+apps/lunches/    lunches, picks, completing or skipping, locking, live board
 apps/ordering/   confirm, place exactly once, hand-off to host, delivery; ordering providers
 apps/catalog/    Swiggy restaurants, menus and dishes (Swiggy's public web endpoints, cached briefly)
 tests/           one test per spec scenario
@@ -27,38 +27,50 @@ Each app keeps business rules in `services.py`; views only parse input and shape
 
 All endpoints take `Authorization: Bearer <Firebase ID token>`. Money is in paise.
 
-Access is by permission, not role: each company endpoint names the one it needs (the
-`required_permissions` of its view), and a method that names none is refused. Whoever sets
-up a company gets every permission; people who join get the member set (`session_read`,
-`pick_create`, `pick_update`, `pick_delete`, `restaurant_read`, `member_read`). Anyone with
-`member_update` can grant or remove permissions they hold themselves, and a company always
-keeps at least one person with `member_update`. `GET /api/permissions` lists them all.
+Access is by permission, and people get permissions through roles. A role belongs to a
+company and is a named set of permissions (the `roles`, `role_permissions` and `user_roles`
+tables); a person has any number of roles and may do whatever they grant together, so an
+"Auditor" with `session_read` and `member_read` sees lunches and the team and can do nothing
+else. Each company endpoint names the permission it needs (the `required_permissions` of its
+view), and a method that names none is refused. Every company has two built-in roles that
+can't be changed: **Host** (every permission, given to whoever sets the company up) and
+**Member** (`session_read`, `pick_create`, `pick_update`, `pick_delete`, `restaurant_read`,
+`member_read`, given to people who join). Anyone with `member_update` can make roles and
+give them to people, granting or removing only permissions they hold themselves, and a
+company always keeps at least one person with `member_update`. The rules live in
+`apps/accounts/rbac.py`. `GET /api/permissions` lists every permission.
 
 | Method | Path | Permission | What |
 |---|---|---|---|
-| GET | `/api/me` | signed in | You, your org (`org: null` until set up or until a public-email person hosts), `org.kind` (`company` or `personal`), `public_email`, and your permissions |
+| GET | `/api/me` | signed in | You, your org (`org: null` until set up or until a public-email person hosts), `org.kind` (`company` or `personal`), `public_email`, your roles, and the permissions they give |
 | POST | `/api/me/push-token` | in a company | Subscribe this device to company notifications |
-| POST | `/api/company` | no company yet | Set up your company; you get every permission (public emails like Gmail can't: they host a personal party instead) |
+| POST | `/api/company` | no company yet | Set up your company; you get the Host role (public emails like Gmail can't: they host a personal party instead) |
 | GET | `/api/permissions` | in a company | Every permission and what it allows |
-| GET | `/api/company/members` | `member_read` | Everyone in the company, with their permissions |
-| PUT | `/api/company/members/<id>/permissions` | `member_update` | Set someone's permissions: `{"permissions": [...]}` |
+| GET | `/api/company/members` | `member_read` | Everyone in the company, with their roles and permissions |
+| PUT | `/api/company/members/<id>/roles` | `member_update` | Set someone's roles: `{"roles": [role ids]}` |
+| GET | `/api/company/roles` | `member_read` | The company's roles: `name`, `system`, `permissions`, `members` |
+| POST | `/api/company/roles` | `member_update` | Make a role: `{"name": "Auditor", "permissions": [...]}` |
+| PATCH, DELETE | `/api/company/roles/<id>` | `member_update` | Rename a role or change its permissions; delete one nobody has (Host and Member can't change) |
+| POST | `/api/company/addresses` | `company_update` | Add an address to the host's list: `address`, and `lat`, `lng` if picked from the place suggestions |
+| DELETE | `/api/company/addresses/<id>` | `company_update` | Take an address off the list (lunches that went there keep it) |
 | GET | `/api/restaurants?lat=&lng=[&q=]` | `restaurant_read` | Swiggy restaurants near a place, or matching `q` |
 | GET | `/api/restaurants/<id>/menu?lat=&lng=` | `restaurant_read` | A restaurant's details and full menu (prices in paise) |
 | GET | `/api/dishes?lat=&lng=&q=` | `restaurant_read` | Dishes by name, each with its restaurant |
 | GET | `/api/places?q=[&lat=&lng=]` | `restaurant_read`, or a public email | Place suggestions while typing an address (OpenStreetMap: Photon) |
 | GET | `/api/places/<place_id>` | `restaurant_read`, or a public email | The address and `lat`/`lng` of a suggested place |
 | GET | `/api/lunches` | `session_read` | Last 30 lunches: your org's and the ones you joined (`joined: true`) |
-| POST | `/api/lunches` | `session_create` | Start a lunch: `cutoff_at`, `delivery_address`, optional `name`, `delivery_lat`, `delivery_lng`. A public-email person with no org gets a personal party made for them |
+| POST | `/api/lunches` | `session_create` | Start a lunch (a company runs one at a time: 409 while one isn't closed or called off): `cutoff_at`, `address` (`{address, lat, lng}`, kept in the company's addresses; the lunch points at it), optional `name`, `offered_restaurants`. A public-email person with no org gets a personal party made for them |
 | GET | `/api/lunches/<id>` | `session_read` | The full board (what a shared link opens) |
 | POST | `/api/lunches/<id>/join` | signed in | Join a personal party's lunch from its link (a company's lunch only its own people); answers with the board |
 | POST | `/api/lunches/<id>/lock` | `session_update` | Close picks before the cutoff |
+| PUT | `/api/lunches/<id>/ticks` | `session_update` | Tick or untick what the host tracks while running the lunch: `{kind, key, done}`, where `kind` is `reviewed_restaurant`, `reviewed_person`, `arrived` or `handed_out` and `key` is the restaurant's name or the person's id. Kept on the lunch, so every device shows the same; changing a pick clears its review ticks |
 | POST | `/api/lunches/<id>/cancel` | `session_delete` | Call off a lunch not yet confirmed |
 | POST | `/api/lunches/<id>/items` | `pick_create` | Pick a dish |
 | PATCH | `/api/lunches/<id>/items/<item_id>` | `pick_update` | Change your pick (only your own) |
 | DELETE | `/api/lunches/<id>/items/<item_id>` | `pick_delete` | Drop your pick (only your own) |
-| PUT, DELETE | `/api/lunches/<id>/skip` | `pick_update` | Skip the lunch, or rejoin |
+| PUT, DELETE | `/api/lunches/<id>/skip` | `pick_update` | Skip the lunch (completed with nothing picked; only the host can reopen it) |
 | POST | `/api/lunches/<id>/confirm` | `review_create` | Approve the reviewed cart; orders go out |
-| POST | `/api/orders/<id>/placed` | `order_update` | Enter the Swiggy order number after checking out yourself |
+| POST | `/api/orders/<id>/placed` | `order_update` | Enter the platform's order number (`platform_order_id`) after checking out yourself |
 | POST | `/api/orders/<id>/delivered` | `order_update` | Mark food arrived |
 | POST | `/internal/tasks/<job>` | Cloud Tasks only | `lock-lunch`, `place-order`, `poll-delivery` |
 | GET | `/healthz` | anyone | Liveness |
@@ -66,12 +78,21 @@ keeps at least one person with `member_update`. `GET /api/permissions` lists the
 The lunch's host is still the person who started it: they get the emails about it.
 
 **Companies and personal parties.** People with a company email domain share a company:
-the first to set it up is its owner with every permission, and people who join get the
-member set (they pick food but can't start lunches or change settings). People with a
+the first to set it up has the Host role, and people who join get the Member role
+(they pick food but can't start lunches or change settings). People with a
 public email (`PUBLIC_EMAIL_DOMAINS`: Gmail and the like) never share an org: each gets
 a personal party when they first start a lunch, and others reach that lunch by joining
 it from its link. A joined person has the member set on that one lunch only; the
 database shows them nothing else (row-level security by org, or by membership).
+
+**Errors** are sentences a person can act on (`apps/core/errors.py`,
+`apps/accounts/messages.py`): what a role doesn't allow and who can change it, something
+that isn't there, when to try again after a rate limit.
+
+**An existing database** made before the migrations were squashed can't be brought up to
+date by a plain `migrate`. Its old data isn't kept: start it over, as the database's
+owner, with `python manage.py reset_database --yes` (add `--allow-production` when
+`DJANGO_DEBUG` is off). It drops every table and builds today's schema.
 
 ## Run locally
 
@@ -168,3 +189,101 @@ check the policies as a normal user.
 5. `firebase deploy --only firestore:rules` with `firestore.rules`.
 6. In Firebase Hosting, rewrite `/api/**` to the Cloud Run service so the web app calls
    the API on its own origin (no CORS needed).
+
+## MCP server (use Lunch Club from an AI assistant)
+
+`mcp_server/` lets an AI assistant (Claude Code, Claude Desktop, Cursor, ...) run a lunch
+for one person: start it from a prompt, share the link, join and pick dishes, lock and
+confirm, record orders. It is a thin layer over the REST API: every tool makes the same
+calls the web app does, as the signed-in person (the access token their assistant got when they pressed Allow), so it can do
+only what that person can. 23 tools (`whoami`, `start_lunch`, `share_lunch`, `join_lunch`,
+`find_restaurants`, `get_menu`, `pick_dish`, `lock_lunch`, `confirm_lunch`, ...) and two
+prompts (`start_team_lunch`, `pick_my_lunch`). `confirm_lunch` and `cancel_lunch` refuse
+until called with `confirm=true`, which the assistant should only do after asking.
+
+**Signing in (the callback flow).** The person adds the server's address to their assistant
+and clicks Connect; nothing is copied or pasted. The assistant finds where to sign in
+(`/.well-known/oauth-protected-resource` on the MCP server, then
+`/.well-known/oauth-authorization-server` on the API), registers itself (`POST /oauth/register`),
+and opens `/oauth/authorize`, which sends the browser to the web app's consent page
+(`#/authorize/<id>`). The person, already signed in with Google, presses Allow; the browser
+returns to the assistant's callback with a one-time code, which the assistant trades at
+`/oauth/token` (PKCE, S256, required) for an hour-long access token and a refresh token. The
+authorization server is the API (`apps/oauth`); the MCP server only checks tokens and points
+unauthenticated calls at the sign-in (401 with `WWW-Authenticate`). Safety: redirect
+addresses must be https or loopback and match what was registered exactly; codes live two
+minutes and work once (using one twice cancels what it gave out); refresh tokens are
+replaced on every use, and one used twice revokes the whole line; the consent screen shows
+where the person will be sent back to; and the token can do only what any access token can
+(lunches, restaurants, places, orders, notifications). People see and end connections in
+Connect to an AI assistant (they appear in its list under the app's name, with a Disconnect
+button). Signing in is the only way to connect: there are no tokens to make or copy. Only a
+token's SHA-256 is stored.
+
+**Run it** (needs `uv sync --group mcp`; the web link and API come from environment
+variables):
+
+```bash
+# for developing the server (stdio): one person, an access token from a sign-in in the environment
+LUNCHCLUB_API_URL=https://<api> LUNCHCLUB_WEB_URL=https://<web> LUNCHCLUB_TOKEN=lc_... \
+  uv run --group mcp python -m mcp_server
+
+# as a shared web service (streamable HTTP at /mcp): each caller sends their own
+# `Authorization: Bearer lc_...`; the server keeps none. No token in the environment is
+# ever used for a web caller.
+MCP_ALLOWED_HOSTS=<this host> uv run --group mcp python -m mcp_server --http --port 8080
+docker build -f Dockerfile.mcp -t lunchclub-mcp .      # the same, as a small image
+```
+
+Connect a client by signing in: `claude mcp add --transport http lunchclub
+https://<mcp-host>/mcp`, then `/mcp` in Claude Code and Authenticate; in claude.ai or
+Claude Desktop, Settings, Connectors, Add custom connector, paste the address. That is the one
+way to connect; the web app's Connect to an AI assistant page explains it with examples and lists
+the tools.
+
+Settings. **API**: `API_PUBLIC_URL` (its own public address, the sign-in "issuer";
+default: from the request), `APP_URL` (the web app, where the consent page lives),
+`OAUTH_ACCESS_TOKEN_SECONDS` (3600), `OAUTH_REFRESH_TOKEN_DAYS` (30). **MCP server**:
+`LUNCHCLUB_API_URL`, `LUNCHCLUB_WEB_URL`, `MCP_PUBLIC_URL` (its own public address; set it
+when behind a proxy), `MCP_AUTH_ISSUER` (default: the API), `MCP_ALLOWED_HOSTS`,
+`LUNCHCLUB_TZ` (default Asia/Kolkata, for times like "12:30").
+
+## Security hardening
+
+What the code does for you, and the few steps only you can do (they are in Neon, Vercel
+and Google Cloud).
+
+**Done in code**
+- **Rate limits** (`apps/core/throttling.py`): 600 requests a minute per signed-in person,
+  and tighter ones for place search (60), restaurant browsing (60), joining by link (20).
+  Change them with `THROTTLE_USER`, `THROTTLE_CATALOG`,
+  `THROTTLE_PLACES`, `THROTTLE_JOIN`. With several server instances
+  (Vercel) set `THROTTLE_CACHE=database` so they share one count; if that table is ever
+  missing the limit is skipped rather than breaking requests.
+- **The host can close the share link** to new people (`PUT /api/lunches/<id>/joining`),
+  and the link stops letting new people in at the cutoff or once picks lock.
+- **Notification devices** are capped at 10 per person (the least recently seen go first).
+- **Allowed hosts**: `make check` warns if `DJANGO_ALLOWED_HOSTS` has a wildcard
+  (`.vercel.app`, `*`).
+- **Secrets**: `scripts/check_secrets.sh` runs in the commit hook, in `make ready` and in CI.
+- **Dependencies**: Dependabot opens one grouped pull request a month; CI runs the security
+  audit on every push.
+
+**Do once: a database role that can't skip row-level security.** Neon's default
+`neondb_owner` can, so company isolation would rest on the code's own filtering alone.
+1. Run as the owner: `DATABASE_URL='<owner url>' DJANGO_SECRET_KEY=x DJANGO_DEBUG=false
+   uv run python manage.py create_app_role` (it prints the new role's URL once).
+2. Put that URL (pooled host) in Vercel as `DATABASE_URL`. Keep the owner's URL for
+   `migrate` only.
+3. Check it: `... manage.py check_rls` says the role is subject to row-level security.
+4. Set `REQUIRE_RLS=true` in Vercel, so the app refuses to start as a role that can skip it.
+
+**Do once: secrets.** Reset the Neon password (Neon, Branch, Roles, Reset password) if it
+has ever been in a chat or a terminal. Keep `FIREBASE_CREDENTIALS_JSON`,
+`GEOAPIFY_API_KEY` and `DJANGO_SECRET_KEY` as Vercel secrets only.
+
+**Do once: restrict the Firebase web API key.** Google Cloud Console, APIs & Services,
+Credentials, open the "Browser key" (the one in `lunch-board/src/lib/firebase.ts`),
+Application restrictions: Websites, add `https://lunchclubfe.vercel.app/*` and
+`http://localhost:5173/*`. Under API restrictions allow only Identity Toolkit, Token
+Service, Firebase Installations and Firebase Cloud Messaging Registration.

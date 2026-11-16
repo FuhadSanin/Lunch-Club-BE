@@ -1,11 +1,13 @@
 from rest_framework import serializers
 
 from apps.accounts.models import (
+    Address,
+    ApiToken,
     Invite,
     Notification,
-    OfficeAddress,
     Organization,
     Permission,
+    Role,
     User,
 )
 from apps.accounts.services import is_public_email
@@ -18,10 +20,23 @@ class OrganizationSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "email_domain", "kind"]
 
 
+class RoleNameSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Role
+        fields = ["id", "name"]
+        read_only_fields = fields
+
+
 class UserSerializer(serializers.ModelSerializer):
+    """A person with their roles, and the permissions those roles give them together.
+    Expects `prefetch_related("roles__grants")` when listing many."""
+
+    roles = RoleNameSerializer(many=True, read_only=True)
+    permissions = serializers.ListField(child=serializers.CharField(), read_only=True)
+
     class Meta:
         model = User
-        fields = ["id", "name", "email", "permissions"]
+        fields = ["id", "name", "email", "roles", "permissions"]
         read_only_fields = fields
 
 
@@ -38,7 +53,27 @@ class MeSerializer(UserSerializer):
         return is_public_email(user.email)
 
 
-class PermissionsSerializer(serializers.Serializer):
+class RoleSerializer(serializers.ModelSerializer):
+    """A role with what it grants and how many people have it. Expects
+    `prefetch_related("grants")` and a `members` count annotation when listing."""
+
+    system = serializers.BooleanField(source="is_system", read_only=True)
+    permissions = serializers.SerializerMethodField()
+    members = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = Role
+        fields = ["id", "name", "system", "permissions", "members"]
+        read_only_fields = fields
+
+    def get_permissions(self, role: Role) -> list[str]:
+        return sorted(grant.permission for grant in role.grants.all())
+
+
+class RoleWriteSerializer(serializers.Serializer):
+    """POST and PATCH /api/company/roles: a name and the permissions it grants."""
+
+    name = serializers.CharField(max_length=60, trim_whitespace=True)
     permissions = serializers.ListField(
         child=serializers.ChoiceField(choices=Permission.choices),
         max_length=len(Permission),
@@ -48,12 +83,18 @@ class PermissionsSerializer(serializers.Serializer):
         return sorted(set(value))
 
 
+class MemberRolesSerializer(serializers.Serializer):
+    roles = serializers.ListField(
+        child=serializers.UUIDField(), max_length=50, allow_empty=True
+    )
+
+
 class NotificationSerializer(serializers.ModelSerializer):
     read = serializers.SerializerMethodField()
 
     class Meta:
         model = Notification
-        fields = ["id", "title", "body", "link", "read", "created_at"]
+        fields = ["id", "title", "body", "read", "created_at"]
 
     def get_read(self, notification: Notification) -> bool:
         return notification.read_at is not None
@@ -66,17 +107,38 @@ class MarkReadSerializer(serializers.Serializer):
     )
 
 
+class ApiTokenSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ApiToken
+        fields = ["id", "name", "prefix", "created_at", "last_used_at", "expires_at"]
+
+
 class PushTokenSerializer(serializers.Serializer):
     token = serializers.CharField(max_length=4096)
 
 
-class OfficeAddressSerializer(serializers.ModelSerializer):
+class AddressSerializer(serializers.ModelSerializer):
+    """An address, with where it is when it was picked from the place suggestions."""
+
     address = serializers.CharField(max_length=300, trim_whitespace=True)
+    lat = serializers.FloatField(
+        min_value=-90, max_value=90, allow_null=True, required=False
+    )
+    lng = serializers.FloatField(
+        min_value=-180, max_value=180, allow_null=True, required=False
+    )
 
     class Meta:
-        model = OfficeAddress
-        fields = ["id", "address"]
+        model = Address
+        fields = ["id", "address", "lat", "lng"]
         read_only_fields = ["id"]
+
+    def validate(self, attrs):
+        if (attrs.get("lat") is None) != (attrs.get("lng") is None):
+            raise serializers.ValidationError(
+                {"lat": "Give the address's latitude and longitude together."}
+            )
+        return attrs
 
 
 class CompanySettingsSerializer(serializers.ModelSerializer):
@@ -87,14 +149,7 @@ class CompanySettingsSerializer(serializers.ModelSerializer):
     team_name = serializers.CharField(
         max_length=120, trim_whitespace=True, allow_blank=True, required=False
     )
-    radius_km = serializers.FloatField(min_value=0.5, max_value=8.0, required=False)
-    office_lat = serializers.FloatField(
-        min_value=-90, max_value=90, allow_null=True, required=False
-    )
-    office_lng = serializers.FloatField(
-        min_value=-180, max_value=180, allow_null=True, required=False
-    )
-    addresses = OfficeAddressSerializer(many=True, read_only=True)
+    addresses = serializers.SerializerMethodField()
 
     class Meta:
         model = Organization
@@ -104,25 +159,15 @@ class CompanySettingsSerializer(serializers.ModelSerializer):
             "team_name",
             "email_domain",
             "auto_join",
-            "restaurant_mode",
-            "radius_km",
-            "office_lat",
-            "office_lng",
             "addresses",
         ]
         read_only_fields = ["id", "email_domain", "addresses"]
 
-    def validate(self, attrs):
-        def value(field):
-            if field in attrs:
-                return attrs[field]
-            return getattr(self.instance, field, None)
-
-        if (value("office_lat") is None) != (value("office_lng") is None):
-            raise serializers.ValidationError(
-                {"office_lat": "Give the office's latitude and longitude together."}
-            )
-        return attrs
+    def get_addresses(self, org: Organization) -> list[dict]:
+        """The ones on the host's list. Expects the saved ones prefetched as
+        `saved_addresses`."""
+        saved = org.saved_addresses  # type: ignore[attr-defined]
+        return list(AddressSerializer(saved, many=True).data)
 
 
 class InviteSerializer(serializers.ModelSerializer):

@@ -13,6 +13,8 @@ urlpatterns = [
     path("lunches/<uuid:lunch_id>/skip/<uuid:user_id>", views.SkipPersonView.as_view()),
     path("lunches/<uuid:lunch_id>/complete", views.CompleteView.as_view()),
     path("lunches/<uuid:lunch_id>/complete/<uuid:user_id>", views.ReopenView.as_view()),
+    path("lunches/<uuid:lunch_id>/joining", views.JoiningView.as_view()),
+    path("lunches/<uuid:lunch_id>/ticks", views.TicksView.as_view()),
     path("lunches/<uuid:lunch_id>/lock", views.LockView.as_view()),
     path("lunches/<uuid:lunch_id>/unlock", views.UnlockView.as_view()),
     path("lunches/<uuid:lunch_id>/cancel", views.CancelView.as_view()),

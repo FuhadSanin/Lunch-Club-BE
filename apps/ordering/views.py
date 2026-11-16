@@ -4,14 +4,14 @@ from rest_framework.response import Response
 
 from apps.accounts.models import Permission
 from apps.accounts.permissions import CompanyAPIView
-from apps.lunches.models import SwiggyOrder
+from apps.lunches.models import Order
 from apps.lunches.views import board_response, get_lunch_for_update
 from apps.ordering import bot_status, services
 
 
-class SwiggyOrderNumberSerializer(serializers.Serializer):
+class OrderNumberSerializer(serializers.Serializer):
     # Optional: the host may just mark the order as placed.
-    swiggy_order_id = serializers.CharField(
+    platform_order_id = serializers.CharField(
         max_length=64,
         trim_whitespace=True,
         required=False,
@@ -20,7 +20,7 @@ class SwiggyOrderNumberSerializer(serializers.Serializer):
     )
 
 
-def lock_company_order(request, order_id) -> SwiggyOrder:
+def lock_company_order(request, order_id) -> Order:
     order = services.lock_order(order_id)
     if order is None or order.session.org_id != request.user.org_id:
         raise Http404
@@ -71,10 +71,10 @@ class OrderPlacedView(CompanyAPIView):
     required_permissions = {"POST": Permission.ORDER_UPDATE}
 
     def post(self, request, order_id):
-        serializer = SwiggyOrderNumberSerializer(data=request.data)
+        serializer = OrderNumberSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         order = lock_company_order(request, order_id)
-        services.record_placed(order, serializer.validated_data["swiggy_order_id"])
+        services.record_placed(order, serializer.validated_data["platform_order_id"])
         return board_response(order.session_id)
 
 

@@ -19,7 +19,7 @@ from django.utils import timezone
 from apps.core import jobs, notify, tenancy
 from apps.core.errors import Conflict, RetryLater
 from apps.lunches import board
-from apps.lunches.models import OrderSession, OrderStatus, SessionStatus, SwiggyOrder
+from apps.lunches.models import Order, OrderSession, OrderStatus, SessionStatus
 from apps.lunches.services import lunch_link
 from apps.ordering.progress import Progress
 from apps.ordering.providers import get_provider
@@ -32,12 +32,10 @@ logger = logging.getLogger(__name__)
 MAX_DELIVERY_POLLS = 36
 
 
-def lock_order(order_id: UUID) -> SwiggyOrder | None:
+def lock_order(order_id: UUID) -> Order | None:
     """Lock a Swiggy order and its lunch, in the documented order."""
     lunch_id = (
-        SwiggyOrder.objects.filter(id=order_id)
-        .values_list("session_id", flat=True)
-        .first()
+        Order.objects.filter(id=order_id).values_list("session_id", flat=True).first()
     )
     if lunch_id is None:
         return None
@@ -46,7 +44,7 @@ def lock_order(order_id: UUID) -> SwiggyOrder | None:
         .select_related("host")
         .get(id=lunch_id)
     )
-    order = SwiggyOrder.objects.select_for_update().get(id=order_id)
+    order = Order.objects.select_for_update().get(id=order_id)
     order.session = lunch
     return order
 
@@ -116,10 +114,10 @@ def place(org_id: UUID, order_id: UUID) -> None:
     with tenancy.scoped(org_id):
         order = lock_order(order_id)
         if order is not None and order.status == OrderStatus.PLACING:
-            _set_placed(order, result.swiggy_order_id)
+            _set_placed(order, result.platform_order_id)
 
 
-def retry(order: SwiggyOrder) -> None:
+def retry(order: Order) -> None:
     """The host asks the bot to try this order again, e.g. after logging in again.
 
     Expects `order` from lock_order.
@@ -135,15 +133,15 @@ def retry(order: SwiggyOrder) -> None:
     board.publish(order.session)
 
 
-def record_placed(order: SwiggyOrder, swiggy_order_id: str) -> None:
+def record_placed(order: Order, platform_order_id: str) -> None:
     """The host placed this order in the Swiggy app. Expects `order` from lock_order."""
     if order.status != OrderStatus.NEEDS_HOST:
         raise Conflict("This order isn't waiting for you.")
-    _set_placed(order, swiggy_order_id)
+    _set_placed(order, platform_order_id)
     _start_next_order(order)
 
 
-def record_delivered(order: SwiggyOrder) -> None:
+def record_delivered(order: Order) -> None:
     """The host has the food. Expects `order` from lock_order."""
     if order.status != OrderStatus.PLACED:
         raise Conflict("Only a placed order can be marked delivered.")
@@ -153,12 +151,10 @@ def record_delivered(order: SwiggyOrder) -> None:
 def poll_delivery(org_id: UUID, order_id: UUID, poll: int) -> None:
     """Check Swiggy for delivery. Runs as the poll-delivery job every few minutes."""
     with tenancy.scoped(org_id):
-        order = SwiggyOrder.objects.filter(
-            id=order_id, status=OrderStatus.PLACED
-        ).first()
+        order = Order.objects.filter(id=order_id, status=OrderStatus.PLACED).first()
         if order is None:
             return
-    if _call(get_provider().is_delivered, order.swiggy_order_id):
+    if _call(get_provider().is_delivered, order.platform_order_id):
         with tenancy.scoped(org_id):
             order = lock_order(order_id)
             if order is not None and order.status == OrderStatus.PLACED:
@@ -167,11 +163,11 @@ def poll_delivery(org_id: UUID, order_id: UUID, poll: int) -> None:
         _schedule_delivery_poll(org_id, order_id, poll + 1)
 
 
-def _earlier_orders(order: SwiggyOrder):
+def _earlier_orders(order: Order):
     return order.session.orders.filter(created_at__lt=order.created_at)
 
 
-def _waits_for_earlier_order(order: SwiggyOrder) -> bool:
+def _waits_for_earlier_order(order: Order) -> bool:
     """True if this provider orders one restaurant at a time and an earlier order of the
     same lunch hasn't been placed yet."""
     if not get_provider().sequential:
@@ -183,7 +179,7 @@ def _waits_for_earlier_order(order: SwiggyOrder) -> bool:
     )
 
 
-def _start_next_order(order: SwiggyOrder) -> None:
+def _start_next_order(order: Order) -> None:
     """After one order is placed, let the next waiting one fill its cart."""
     if not get_provider().sequential:
         return
@@ -199,13 +195,13 @@ def _start_next_order(order: SwiggyOrder) -> None:
         jobs.enqueue("place-order", payload, key=f"{following.id}-after-{order.id}")
 
 
-def _place_request(order: SwiggyOrder) -> PlaceRequest:
+def _place_request(order: Order) -> PlaceRequest:
     lunch = order.session
     items = order.items.order_by("restaurant_name", "dish_name")
     return PlaceRequest(
         order_id=order.id,
         host_id=lunch.host_id,
-        delivery_address=lunch.delivery_address,
+        delivery_address=lunch.address.address,
         lines=tuple(
             CartLine(
                 item.restaurant_name,
@@ -249,7 +245,7 @@ def _save_steps(org_id: UUID, order_id: UUID, steps: list[dict]) -> None:
     Also renews the placement lease: a bot that is making progress is not crashed.
     """
     with _sync_orm_allowed(), tenancy.scoped(org_id):
-        order = SwiggyOrder.objects.select_related("session").get(id=order_id)
+        order = Order.objects.select_related("session").get(id=order_id)
         order.bot_steps = steps
         order.save(update_fields=["bot_steps", "updated_at"])
         board.publish(order.session)
@@ -289,15 +285,15 @@ def _hand_to_host(org_id: UUID, order_id: UUID, reason: str) -> None:
     notify.email([host_email], "Your lunch order needs you", f"{reason}\n\n{link}")
 
 
-def _set_placed(order: SwiggyOrder, swiggy_order_id: str) -> None:
+def _set_placed(order: Order, platform_order_id: str) -> None:
     order.status = OrderStatus.PLACED
-    order.swiggy_order_id = swiggy_order_id
+    order.platform_order_id = platform_order_id
     order.placed_at = timezone.now()
     order.last_error = ""
     order.save(
         update_fields=[
             "status",
-            "swiggy_order_id",
+            "platform_order_id",
             "placed_at",
             "last_error",
             "updated_at",
@@ -308,7 +304,7 @@ def _set_placed(order: SwiggyOrder, swiggy_order_id: str) -> None:
         _schedule_delivery_poll(order.session.org_id, order.id, 1)
 
 
-def _set_delivered(order: SwiggyOrder) -> None:
+def _set_delivered(order: Order) -> None:
     order.status = OrderStatus.DELIVERED
     order.save(update_fields=["status", "updated_at"])
     _refresh_lunch_status(order.session)

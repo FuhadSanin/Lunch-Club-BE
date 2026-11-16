@@ -4,6 +4,7 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.views import APIView
 
+from apps.accounts.messages import not_allowed
 from apps.accounts.models import MEMBER_PERMISSIONS, Permission
 from apps.accounts.services import is_public_email
 from apps.core import tenancy
@@ -26,7 +27,7 @@ class HasRequiredPermission(BasePermission):
     says what it needs.
     """
 
-    message = "This action isn't available."
+    message = "That isn't something this page can do."
 
     def has_permission(self, request, view) -> bool:
         method = "GET" if request.method == "HEAD" else request.method
@@ -36,7 +37,7 @@ class HasRequiredPermission(BasePermission):
         permission = required[method]
         if permission is None or request.user.has_perm(permission):
             return True
-        self.message = f"You need the {permission} permission to do this."
+        self.message = not_allowed(permission)
         return False
 
 
@@ -63,7 +64,7 @@ class MayTakePart(BasePermission):
     it again with `check_on_lunch` once it has found the lunch.
     """
 
-    message = "This action isn't available."
+    message = "That isn't something this page can do."
 
     def has_permission(self, request, view) -> bool:
         method = "GET" if request.method == "HEAD" else request.method
@@ -77,7 +78,7 @@ class MayTakePart(BasePermission):
             or permission in MEMBER_PERMISSIONS
         ):
             return True
-        self.message = f"You need the {permission} permission to do this."
+        self.message = not_allowed(permission)
         return False
 
 
@@ -108,7 +109,7 @@ class ParticipantAPIView(APIView):
         else:
             allowed = permission in MEMBER_PERMISSIONS
         if not allowed:
-            raise PermissionDenied(f"You need the {permission} permission to do this.")
+            raise PermissionDenied(not_allowed(permission))
 
 
 class MayStartOwnLunch(MayTakePart):

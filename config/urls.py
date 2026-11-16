@@ -1,6 +1,8 @@
 from django.http import JsonResponse
 from django.urls import include, path
 
+from apps.oauth import urls as oauth_urls
+
 
 def healthz(_request):
     return JsonResponse({"ok": True})
@@ -8,6 +10,8 @@ def healthz(_request):
 
 urlpatterns = [
     path("healthz", healthz),
+    *oauth_urls.root,
+    path("api/", include((oauth_urls.api, "oauth"))),
     path("api/", include("apps.accounts.urls")),
     path("api/", include("apps.lunches.urls")),
     path("api/", include("apps.ordering.urls")),

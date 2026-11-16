@@ -3,7 +3,7 @@
 Lunch tables carry a PostgreSQL row-level security policy that only shows rows of
 the company named in the `app.org_id` setting (see
 lunches/migrations/0002_row_level_security), plus the lunches the person named in
-`app.user_id` joined (lunches/migrations/0006_party_sessions). The settings are
+`app.user_id` joined (same migration). The settings are
 transaction-local, so they never leak to the next request on a pooled connection, and
 with nothing set the policies show nothing.
 """

@@ -1,0 +1,15 @@
+# The Lunch Club MCP server on its own: a small image for any container host (Cloud Run,
+# Fly, Render...). It needs no database; it calls the REST API (LUNCHCLUB_API_URL).
+#   docker build -f Dockerfile.mcp -t lunchclub-mcp .
+#   docker run -p 8080:8080 -e LUNCHCLUB_API_URL=https://<api> \
+#     -e LUNCHCLUB_WEB_URL=https://<web> -e MCP_ALLOWED_HOSTS=<this host> lunchclub-mcp
+FROM python:3.12-slim
+WORKDIR /app
+COPY mcp_server/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+COPY mcp_server ./mcp_server
+RUN useradd --create-home app
+USER app
+ENV PORT=8080
+EXPOSE 8080
+CMD ["sh", "-c", "python -m mcp_server --http --host 0.0.0.0 --port ${PORT}"]

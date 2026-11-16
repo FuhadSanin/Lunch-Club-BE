@@ -2,24 +2,33 @@
 
 from datetime import timedelta
 from functools import partial
+from uuid import UUID
 
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q, QuerySet
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from rest_framework.exceptions import ParseError, PermissionDenied
+from rest_framework.exceptions import ParseError, PermissionDenied, ValidationError
 
-from apps.accounts.models import Notification, OrgKind, Permission, User
+from apps.accounts import services as accounts
+from apps.accounts.messages import not_allowed
+from apps.accounts.models import (
+    Notification,
+    Organization,
+    OrgKind,
+    Permission,
+    User,
+)
 from apps.core import jobs, notify, tenancy
 from apps.core.errors import Conflict
 from apps.lunches import board
 from apps.lunches.models import (
+    Order,
     OrderItem,
     OrderSession,
     SessionMember,
     SessionStatus,
-    SwiggyOrder,
 )
 
 # How long picks stay open when a lunch is unlocked after its cutoff has passed.
@@ -67,13 +76,17 @@ def tell_participants(
 ) -> None:
     """Tell everyone in a lunch (but `skip`, who just did it): a line in each person's
     bell now, in the same transaction as the change, and a push once it commits.
+
+    The bell's line has no link of its own: it is about the lunch the person is in,
+    which is what the app shows. The push carries the lunch's link, because tapping
+    it has to open the app somewhere.
     """
     link = lunch_link(lunch)
     people = participants(lunch)
     if skip is not None:
         people = people.exclude(id=skip.id)
     Notification.objects.bulk_create(
-        [Notification(user=p, title=title, body=body, link=link) for p in people]
+        [Notification(user=p, title=title, body=body) for p in people]
     )
     if lunch.org.kind == OrgKind.PERSONAL:
         send = partial(notify.push_to_lunch, lunch.id, title, body, link)
@@ -89,7 +102,7 @@ def tell_participants(
 def _tell_host(lunch: OrderSession, title: str, body: str) -> None:
     """A line in the host's bell now, and a push to the host's own devices on commit."""
     link = lunch_link(lunch)
-    Notification.objects.create(user=lunch.host, title=title, body=body, link=link)
+    Notification.objects.create(user=lunch.host, title=title, body=body)
     tokens = list(lunch.host.devices.values_list("token", flat=True))
     transaction.on_commit(partial(notify.push_to_devices, tokens, title, body, link))
 
@@ -116,7 +129,7 @@ def _after_finishing(lunch: OrderSession, user: User, *, was_done: bool) -> None
     everyone = participants(lunch)
     total = everyone.count()
     done = lunch.completed_by.filter(id__in=everyone.values("id")).count()
-    skipped = lunch.skipped_by.filter(id=user.id).exists()
+    skipped = not lunch.items.filter(user=user).exists()  # nothing picked: skipped
     if user.id != lunch.host_id and not skipped:
         _tell_host(
             lunch,
@@ -163,18 +176,44 @@ def ensure_free(user: User) -> None:
         )
 
 
-def start(host: User, cutoff_at, delivery_address: str, **extra) -> OrderSession:
-    """Start a lunch; `extra` is its name and where the address is, if given."""
+def _ensure_company_free(org_id: UUID) -> None:
+    """A company runs one lunch at a time: refuse a new one while one isn't over.
+
+    The company's row is locked first, so two hosts starting at the same moment run one
+    after the other and the second is refused."""
+    Organization.objects.select_for_update().get(id=org_id)
+    running = OrderSession.objects.filter(_active(), org_id=org_id).first()
+    if running is not None:
+        raise Conflict(
+            f"“{running.name or 'A lunch'}” is still running. Close it first, then "
+            "start a new one."
+        )
+
+
+def start(host: User, cutoff_at, address: dict, **extra) -> OrderSession:
+    """Start a lunch delivered to `address` (its `address` text and, if known, `lat`
+    and `lng`); `extra` is its name and the restaurants offered, if given.
+
+    The address goes in the company's addresses (the one with that text is reused), and
+    the lunch points at it."""
     org_id = host.org_id
     if org_id is None:  # views make a public-email host's party first
         raise Conflict("Set up or join your company first.")
     if host.org and host.org.kind == OrgKind.PERSONAL:
         ensure_free(host)
+    else:
+        _ensure_company_free(org_id)
     lunch = OrderSession.objects.create(
         org_id=org_id,
         host=host,
         cutoff_at=cutoff_at,
-        delivery_address=delivery_address,
+        address=accounts.save_address(
+            org_id,
+            address["address"],
+            address.get("lat"),
+            address.get("lng"),
+            saved=False,
+        )[0],
         **extra,
     )
     jobs.enqueue(
@@ -198,13 +237,11 @@ def join(user: User, lunch_id) -> OrderSession:
     """
     with tenancy.joining(lunch_id):
         lunch = get_object_or_404(
-            OrderSession.objects.select_related("org"), id=lunch_id
+            OrderSession.objects.select_related("org", "host"), id=lunch_id
         )
         if lunch.org_id == user.org_id:
             if not user.has_perm(Permission.SESSION_READ):
-                raise PermissionDenied(
-                    f"You need the {Permission.SESSION_READ} permission to do this."
-                )
+                raise PermissionDenied(not_allowed(Permission.SESSION_READ))
             return lunch
         if lunch.org.kind != OrgKind.PERSONAL:
             raise PermissionDenied(
@@ -213,13 +250,28 @@ def join(user: User, lunch_id) -> OrderSession:
             )
         if SessionMember.objects.filter(session=lunch, user=user).exists():
             return lunch
-        if lunch.status != SessionStatus.OPEN:
+        if lunch.status != SessionStatus.OPEN or lunch.cutoff_at <= timezone.now():
             raise ParseError("This lunch has closed.")
+        if not lunch.joining_open:
+            raise PermissionDenied(
+                f"{lunch.host.name or 'The host'} has closed this lunch to new people. "
+                "Ask them for a new link or to open it again."
+            )
         SessionMember.objects.create(session=lunch, user=user, org_id=lunch.org_id)
         subscribe_devices(user, lunch)
         tell_host_someone_joined(lunch, user)
         board.publish(lunch)  # everyone's board shows the new person at once
     return lunch
+
+
+def set_joining(lunch: OrderSession, open_: bool) -> None:
+    """The host opens or closes the share link to new people. Expects `lunch` locked
+    with select_for_update. Only a lunch still taking picks has a link to close."""
+    if lunch.status != SessionStatus.OPEN:
+        raise Conflict("Picks have closed, so nobody new can join anyway.")
+    lunch.joining_open = open_
+    lunch.save(update_fields=["joining_open", "updated_at"])
+    board.publish(lunch)
 
 
 def leave(lunch: OrderSession, user: User) -> None:
@@ -241,7 +293,6 @@ def leave(lunch: OrderSession, user: User) -> None:
             "Your food is already being ordered. You can leave once it arrives."
         )
     lunch.items.filter(user=user).delete()
-    lunch.skipped_by.remove(user)
     lunch.completed_by.remove(user)
     SessionMember.objects.filter(session=lunch, user=user).delete()
     board.publish(lunch)
@@ -263,16 +314,18 @@ def add_item(lunch: OrderSession, user: User, fields: dict) -> OrderItem:
     """Expects `lunch` locked with select_for_update so picks can't race the cutoff."""
     _ensure_editable(lunch, user)
     item = OrderItem.objects.create(session=lunch, user=user, **fields)
-    lunch.skipped_by.remove(user)
+    _review_again(lunch, user, {item.restaurant_name})
     board.publish(lunch)
     return item
 
 
 def update_item(lunch: OrderSession, item: OrderItem, fields: dict) -> OrderItem:
     _ensure_editable(lunch, item.user)
+    restaurants = {item.restaurant_name}
     for name, value in fields.items():
         setattr(item, name, value)
     item.save()
+    _review_again(lunch, item.user, restaurants | {item.restaurant_name})
     board.publish(lunch)
     return item
 
@@ -280,6 +333,7 @@ def update_item(lunch: OrderSession, item: OrderItem, fields: dict) -> OrderItem
 def remove_item(lunch: OrderSession, item: OrderItem) -> None:
     _ensure_editable(lunch, item.user)
     item.delete()
+    _review_again(lunch, item.user, {item.restaurant_name})
     board.publish(lunch)
 
 
@@ -287,16 +341,17 @@ def skip(lunch: OrderSession, user: User) -> None:
     """Sit this lunch out; any picks are dropped. Final, like completing an order."""
     _ensure_editable(lunch, user)
     was_done = lunch.completed_by.filter(id=user.id).exists()
+    _review_again(lunch, user, _restaurants_of(lunch, user))
     lunch.items.filter(user=user).delete()
-    lunch.skipped_by.add(user)
-    lunch.completed_by.add(user)
+    lunch.completed_by.add(user)  # completed with no dishes is what skipping is
     _after_finishing(lunch, user, was_done=was_done)
     board.publish(lunch)
 
 
 def unskip(lunch: OrderSession, user: User) -> None:
+    """Join back in after skipping. Skipping is final (see `skip`), so this only works
+    once the host has reopened the person's order; before that, it says so."""
     _ensure_editable(lunch, user)
-    lunch.skipped_by.remove(user)
     board.publish(lunch)
 
 
@@ -310,11 +365,12 @@ def replace_picks(
     _ensure_editable(lunch, user)
     if complete and not items:
         raise Conflict("Pick a dish first, or skip today.")
+    changed = _restaurants_of(lunch, user) | {f["restaurant_name"] for f in items}
     lunch.items.filter(user=user).delete()
     OrderItem.objects.bulk_create(
         OrderItem(session=lunch, user=user, **fields) for fields in items
     )
-    lunch.skipped_by.remove(user)
+    _review_again(lunch, user, changed)
     if complete:
         was_done = lunch.completed_by.filter(id=user.id).exists()
         lunch.completed_by.add(user)
@@ -337,8 +393,72 @@ def reopen(lunch: OrderSession, person: User) -> None:
     """The host lets someone change a completed order or skipped day again."""
     _ensure_open(lunch)
     lunch.completed_by.remove(person)
-    lunch.skipped_by.remove(person)
     board.publish(lunch)
+
+
+# ---------- the host's ticks while running the lunch ----------
+
+# What can be ticked, the list on the lunch that keeps it, and whether its key is a
+# restaurant's name or a person's id.
+TICKS = {
+    "reviewed_restaurant": ("reviewed_restaurants", "restaurant"),
+    "reviewed_person": ("reviewed_people", "person"),
+    "arrived": ("arrived_restaurants", "restaurant"),
+    "handed_out": ("handed_out_people", "person"),
+}
+
+
+def tick(lunch: OrderSession, kind: str, key: str, done: bool) -> None:
+    """Tick (or untick) one thing the host keeps track of while running a lunch.
+
+    Only what is in the lunch can be ticked: a restaurant someone picked from, a person
+    with dishes. Unticking never fails. Safe to repeat. Expects `lunch` locked with
+    select_for_update, so two hosts ticking at once don't lose each other's ticks.
+    """
+    if lunch.status == SessionStatus.CANCELLED or lunch.closed_at is not None:
+        raise Conflict("This lunch is over.")
+    field, of = TICKS[kind]
+    value: str | UUID = key
+    if of == "person":
+        try:
+            value = UUID(key)
+        except ValueError as error:
+            raise ValidationError({"key": ["Give the person's id."]}) from error
+    ticked = list(getattr(lunch, field))
+    if done and value not in ticked:
+        picked = (
+            lunch.items.filter(user_id=value)
+            if of == "person"
+            else lunch.items.filter(restaurant_name=value)
+        )
+        if not picked.exists():
+            raise ValidationError({"key": [f"No {of} with dishes in this lunch."]})
+        ticked.append(value)
+    elif not done and value in ticked:
+        ticked.remove(value)
+    else:
+        return
+    setattr(lunch, field, ticked)
+    lunch.save(update_fields=[field, "updated_at"])
+    board.publish(lunch)
+
+
+def _restaurants_of(lunch: OrderSession, user: User) -> set[str]:
+    return set(lunch.items.filter(user=user).values_list("restaurant_name", flat=True))
+
+
+def _review_again(lunch: OrderSession, user: User, restaurants: set[str]) -> None:
+    """Someone's picks changed: the host's review ticks for them, and for every
+    restaurant in the old or new picks, are cleared so the host checks them again."""
+    people = [p for p in lunch.reviewed_people if p != user.id]
+    places = [r for r in lunch.reviewed_restaurants if r not in restaurants]
+    if len(people) != len(lunch.reviewed_people) or len(places) != len(
+        lunch.reviewed_restaurants
+    ):
+        lunch.reviewed_people, lunch.reviewed_restaurants = people, places
+        lunch.save(
+            update_fields=["reviewed_people", "reviewed_restaurants", "updated_at"]
+        )
 
 
 def lock(lunch: OrderSession) -> None:
@@ -360,7 +480,7 @@ def lock(lunch: OrderSession) -> None:
     for start_at in range(0, len(restaurants), size):
         batch = set(restaurants[start_at : start_at + size])
         batch_items = [item for item in items if item.restaurant_name in batch]
-        order = SwiggyOrder.objects.create(
+        order = Order.objects.create(
             session=lunch,
             restaurant_count=len(batch),
             total_paise=sum(item.total_paise for item in batch_items),

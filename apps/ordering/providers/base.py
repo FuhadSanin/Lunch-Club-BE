@@ -37,7 +37,7 @@ class PlaceRequest:
 
 @dataclass(frozen=True)
 class PlaceResult:
-    swiggy_order_id: str
+    platform_order_id: str
 
 
 class HostActionRequired(Exception):
@@ -62,5 +62,5 @@ class OrderProvider(ABC):
     def find_existing(self, request: PlaceRequest) -> PlaceResult | None:
         """Return the order if an earlier, interrupted attempt already placed it."""
 
-    def is_delivered(self, swiggy_order_id: str) -> bool:
+    def is_delivered(self, platform_order_id: str) -> bool:
         raise NotImplementedError

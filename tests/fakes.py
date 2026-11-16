@@ -16,12 +16,12 @@ class FakeProvider(OrderProvider):
         self.calls.append("place")
         if self.error:
             raise self.error
-        return PlaceResult(swiggy_order_id=f"SW-{request.order_id.hex[:8]}")
+        return PlaceResult(platform_order_id=f"SW-{request.order_id.hex[:8]}")
 
     def find_existing(self, request: PlaceRequest) -> PlaceResult | None:
         self.calls.append("find_existing")
         return self.existing
 
-    def is_delivered(self, swiggy_order_id: str) -> bool:
+    def is_delivered(self, platform_order_id: str) -> bool:
         self.calls.append("is_delivered")
         return True

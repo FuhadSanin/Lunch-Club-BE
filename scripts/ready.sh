@@ -30,18 +30,11 @@ else
 fi
 
 bold "2/4 Secrets or pasted commands in what would be committed"
-files=$(git ls-files -co --exclude-standard -- . ':!tests' ':!scripts/ready.sh' ':!uv.lock')
-if git ls-files -co --exclude-standard | grep -E '(^|/)\.env$' >/dev/null; then
-  problem "A real .env file would be committed. Keep it out of git."
-fi
-hits=$(echo "$files" | xargs grep -nIE \
-  "npg_[A-Za-z0-9]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY|postgres(ql)?://[^:/@ <'\"]+:[^@ <'\"]{6,}@|^DATABASE_URL='|^DJANGO_SECRET_KEY=[^<x ]{12,}" \
-  2>/dev/null | grep -v '\.env\.example' | head -10)
-if [ -n "$hits" ]; then
-  problem "Looks like a secret or a pasted shell command:"
-  echo "$hits" | sed 's/^/    /' | cut -c1-140
-else
+if out=$(scripts/check_secrets.sh 2>&1); then
   green "✓ no secrets or stray commands"
+else
+  problem "secrets scan"
+  echo "$out" | sed 's/^/  /'
 fi
 
 bold "3/4 Backend checks (same as the hook and CI)"

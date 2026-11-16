@@ -60,7 +60,8 @@ order number once they have checked out in the Swiggy app.
 - **THEN** the checkout is `needs_host` and the host is told to check the Swiggy app first in case the order went through
 
 #### Scenario: Entering the order number
-- **WHEN** someone with `order_update` posts a Swiggy order number for a `needs_host` checkout
+- **WHEN** someone with `order_update` posts the platform's order number (`platform_order_id`)
+  for a `needs_host` checkout
 - **THEN** it is `placed` with that number
 
 #### Scenario: Entering a number for an order that isn't waiting

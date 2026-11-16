@@ -70,7 +70,7 @@ def test_a_company_person_without_a_company_cannot_start_a_lunch(db):
 
     response = client_for(outsider).post(
         "/api/lunches",
-        {"cutoff_at": cutoff.isoformat(), "delivery_address": "Office"},
+        {"cutoff_at": cutoff.isoformat(), "address": {"address": "Office"}},
         format="json",
     )
 
@@ -87,6 +87,7 @@ def test_setting_up_a_company_gives_the_founder_every_permission(db):
     assert response.status_code == 201
     assert response.json()["email_domain"] == "startup.io"
     founder.refresh_from_db()
+    assert founder.org is not None and founder.org.created_by == founder
     assert set(founder.permissions) == ALL_PERMISSIONS
     teammate = user_for_token(claims("teammate@startup.io", uid="uid-teammate"))
     assert teammate.org_id == founder.org_id

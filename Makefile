@@ -61,7 +61,7 @@ format: ## Fix what Ruff can fix and format the code
 	uv run ruff format .
 
 typecheck: ## MyPy with the Django and DRF plugins
-	uv run mypy apps config tests
+	uv run mypy apps config tests mcp_server
 
 check: ## Django's system checks, plus the production security checks
 	$(CHECK_ENV) uv run python manage.py check --fail-level WARNING

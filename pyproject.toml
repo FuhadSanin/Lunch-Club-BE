@@ -23,6 +23,7 @@ dev = [
     "bandit>=1.9.4",
     "django-stubs>=6.1.2",
     "djangorestframework-stubs>=3.18.2",
+    "mcp>=1.25",
     "mypy>=2.4.1",
     "pip-audit>=2.10.1",
     "pre-commit>=4.7.0",
@@ -30,6 +31,9 @@ dev = [
     "pytest-cov>=7.1.0",
     "pytest-django>=4.11",
     "ruff>=0.12",
+]
+mcp = [
+    "mcp>=1.25",
 ]
 
 [tool.pytest.ini_options]
@@ -39,8 +43,8 @@ testpaths = ["tests"]
 addopts = "--reuse-db"
 
 [tool.coverage.run]
-source = ["apps", "config"]
-omit = ["*/migrations/*", "config/wsgi.py"]
+source = ["apps", "config", "mcp_server"]
+omit = ["*/migrations/*", "config/wsgi.py", "mcp_server/__main__.py"]
 
 [tool.coverage.report]
 fail_under = 80
@@ -85,6 +89,9 @@ max-returns = 6
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S105", "S106", "PLR0913", "PLR0917"]
+# An MCP tool's parameters are what the assistant fills in, so a tool may take many, and
+# the server is one function that registers all of them.
+"mcp_server/server.py" = ["PLR0913", "PLR0917", "PLR0915", "C901"]
 # A command-line tool: it talks to the person running it.
 "swiggy_live_menu_inspector.py" = ["T20"]
 

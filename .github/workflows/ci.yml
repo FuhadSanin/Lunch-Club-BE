@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   checks:
-    name: Lint, types, Django checks, security
+    name: Lint, types, Django checks, security, secrets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -27,6 +27,8 @@ jobs:
       - run: make typecheck
       - run: make check
       - run: make security
+      - name: No secrets or pasted commands in the code
+        run: scripts/check_secrets.sh
 
   test:
     name: Tests and coverage

@@ -10,10 +10,10 @@ from apps.core import jobs
 from apps.core.errors import Conflict, RetryLater
 from apps.lunches import services as lunch_services
 from apps.lunches.models import (
+    Order,
     OrderItem,
     OrderStatus,
     SessionStatus,
-    SwiggyOrder,
 )
 from apps.ordering import jobs as ordering_jobs
 from apps.ordering import services
@@ -49,7 +49,7 @@ def confirm(client, lunch, capture):
 
 def mark_interrupted(order, minutes_ago):
     """As if an attempt crashed mid-checkout `minutes_ago` minutes ago."""
-    SwiggyOrder.objects.filter(id=order.id).update(
+    Order.objects.filter(id=order.id).update(
         status=OrderStatus.PLACING,
         updated_at=timezone.now() - timedelta(minutes=minutes_ago),
     )
@@ -81,9 +81,9 @@ def test_confirming_places_each_order_once(
     response = confirm(client, lunch, django_capture_on_commit_callbacks)
 
     assert response.status_code == 200
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
     assert order.status == OrderStatus.PLACED
-    assert order.swiggy_order_id == f"SW-{order.id.hex[:8]}"
+    assert order.platform_order_id == f"SW-{order.id.hex[:8]}"
     lunch.refresh_from_db()
     assert lunch.status == SessionStatus.PLACED
     # Placing again (a duplicate job) does nothing.
@@ -100,7 +100,7 @@ def test_without_automatic_ordering_the_host_is_asked_to_finish(
 
     confirm(client_for(host), lunch, django_capture_on_commit_callbacks)
 
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
     assert order.status == OrderStatus.NEEDS_HOST
     assert "waiting for Swiggy approval" in order.last_error
     assert "mark it as ordered" in order.last_error
@@ -116,17 +116,17 @@ def test_host_records_the_swiggy_order_then_delivery(
     locked_lunch(lunch, member)
     client = client_for(host)
     confirm(client, lunch, django_capture_on_commit_callbacks)
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
 
     placed = client.post(
-        f"/api/orders/{order.id}/placed", {"swiggy_order_id": " 77 "}, format="json"
+        f"/api/orders/{order.id}/placed", {"platform_order_id": " 77 "}, format="json"
     )
     delivered = client.post(f"/api/orders/{order.id}/delivered")
 
     assert placed.status_code == 200
     assert delivered.status_code == 200
     order.refresh_from_db()
-    assert order.swiggy_order_id == "77"
+    assert order.platform_order_id == "77"
     assert order.status == OrderStatus.DELIVERED
     lunch.refresh_from_db()
     assert lunch.status == SessionStatus.DELIVERED
@@ -137,7 +137,7 @@ def test_host_cannot_record_an_order_that_is_not_waiting_for_them(
     host, member, lunch, fake_provider
 ):
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
     client = client_for(host)
 
     assert (
@@ -151,7 +151,7 @@ def test_another_companys_order_is_not_found(
     host, member, lunch, other_company, fake_provider
 ):
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
     stranger = make_user(other_company, "Gina", host.permissions)
 
     response = client_for(stranger).post(f"/api/orders/{order.id}/delivered")
@@ -164,7 +164,7 @@ def test_a_failed_attempt_hands_the_order_to_the_host(
     host, member, lunch, fake_provider, caplog
 ):
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
     fake_provider.error = RuntimeError("boom")
 
     with caplog.at_level(logging.ERROR):
@@ -176,7 +176,7 @@ def test_a_failed_attempt_hands_the_order_to_the_host(
     assert mail.outbox[-1].subject == "Your lunch order needs you"
     # A reason the provider gives is passed on word for word.
     fake_provider.error = HostActionRequired("Log in to Swiggy first.")
-    SwiggyOrder.objects.filter(id=order.id).update(status=OrderStatus.PENDING)
+    Order.objects.filter(id=order.id).update(status=OrderStatus.PENDING)
     services.place(lunch.org_id, order.id)
     order.refresh_from_db()
     assert order.last_error == "Log in to Swiggy first."
@@ -184,7 +184,7 @@ def test_a_failed_attempt_hands_the_order_to_the_host(
 
 def test_a_retry_while_an_attempt_is_running_waits(host, member, lunch, fake_provider):
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
     mark_interrupted(order, minutes_ago=1)
 
     with pytest.raises(RetryLater):
@@ -197,21 +197,19 @@ def test_a_retry_after_a_crash_checks_swiggy_before_ordering_again(
     host, member, lunch, fake_provider
 ):
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
     mark_interrupted(order, minutes_ago=30)
-    fake_provider.existing = type("Found", (), {"swiggy_order_id": "SW-FOUND"})()
+    fake_provider.existing = type("Found", (), {"platform_order_id": "SW-FOUND"})()
 
     services.place(lunch.org_id, order.id)
 
     order.refresh_from_db()
     assert fake_provider.calls[0] == "find_existing"
     assert "place" not in fake_provider.calls
-    assert order.swiggy_order_id == "SW-FOUND"
+    assert order.platform_order_id == "SW-FOUND"
 
     # Nothing found: the order is placed after all.
-    again = SwiggyOrder.objects.create(
-        session=lunch, restaurant_count=1, total_paise=100
-    )
+    again = Order.objects.create(session=lunch, restaurant_count=1, total_paise=100)
     mark_interrupted(again, minutes_ago=30)
     fake_provider.existing = None
     services.place(lunch.org_id, again.id)
@@ -222,7 +220,7 @@ def test_delivery_tracking_marks_the_lunch_delivered(
     host, member, lunch, fake_provider, django_capture_on_commit_callbacks
 ):
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
     services.place(lunch.org_id, order.id)
 
     services.poll_delivery(lunch.org_id, order.id, 1)
@@ -239,9 +237,9 @@ def test_delivery_polls_again_until_the_limit(
     host, member, lunch, fake_provider, monkeypatch
 ):
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
     services.place(lunch.org_id, order.id)
-    fake_provider.is_delivered = lambda swiggy_order_id: False
+    fake_provider.is_delivered = lambda platform_order_id: False
     queued = []
     monkeypatch.setattr(jobs, "enqueue", lambda *a, **k: queued.append((a, k)))
 
@@ -256,7 +254,7 @@ def test_ordering_jobs_run_the_services(
     host, member, lunch, fake_provider, monkeypatch
 ):
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
     payload = {"org_id": str(lunch.org_id), "order_id": str(order.id)}
 
     ordering_jobs.place_order(payload)
@@ -355,7 +353,7 @@ def test_the_host_can_retry_an_order_that_needs_them(
     host, member, lunch, fake_provider, django_capture_on_commit_callbacks
 ):
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
     fake_provider.error = RuntimeError("down")
     services.place(lunch.org_id, order.id)
     fake_provider.error = None
@@ -373,7 +371,7 @@ def test_only_an_order_waiting_for_the_host_can_be_retried(
     host, member, lunch, fake_provider
 ):
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
 
     assert client_for(host).post(f"/api/orders/{order.id}/retry").status_code == 409
 
@@ -385,7 +383,7 @@ def test_steps_are_saved_even_while_the_browsers_event_loop_is_running(
     import asyncio
 
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.get()
+    order = Order.objects.get()
     progress = Progress(
         lambda steps: services._save_steps(lunch.org_id, order.id, steps)
     )
@@ -462,7 +460,7 @@ def test_the_second_restaurant_waits_until_the_first_is_ordered(
     fake_provider.sequential = True
     fake_provider.tracks_delivery = False
     locked_lunch(lunch, member, restaurants=("A Kitchen", "B Kitchen"))
-    first, second = SwiggyOrder.objects.order_by("created_at")
+    first, second = Order.objects.order_by("created_at")
     fake_provider.error = HostActionRequired("Check out in Swiggy")
 
     services.place(lunch.org_id, second.id)
@@ -490,7 +488,7 @@ def test_orders_are_not_held_back_when_the_provider_is_not_sequential(
     host, member, lunch, fake_provider, one_restaurant_each
 ):
     locked_lunch(lunch, member, restaurants=("A Kitchen", "B Kitchen"))
-    first, second = SwiggyOrder.objects.order_by("created_at")
+    first, second = Order.objects.order_by("created_at")
 
     services.place(lunch.org_id, second.id)
 
@@ -503,8 +501,8 @@ def test_placing_an_unknown_or_finished_order_does_nothing(
 ):
     services.place(lunch.org_id, uuid.uuid4())
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.get()
-    SwiggyOrder.objects.filter(id=order.id).update(status=OrderStatus.PLACED)
+    order = Order.objects.get()
+    Order.objects.filter(id=order.id).update(status=OrderStatus.PLACED)
 
     services.place(lunch.org_id, order.id)
 
@@ -518,7 +516,7 @@ def test_confirm_refuses_a_lunch_that_is_not_locked(lunch):
 
 def test_the_place_request_lists_the_dishes(host, member, lunch):
     locked_lunch(lunch, member)
-    order = SwiggyOrder.objects.select_related("session").get()
+    order = Order.objects.select_related("session").get()
 
     request = services._place_request(order)
 

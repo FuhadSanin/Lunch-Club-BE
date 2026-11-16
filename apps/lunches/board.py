@@ -1,8 +1,9 @@
-"""The live board: a Firestore copy of each lunch that browsers listen to.
+"""The live board: a small Firestore document per lunch that browsers listen to.
 
-PostgreSQL stays the source of truth. Only the server writes boards (see
-firestore.rules), always after the change has committed, so the board never shows a
-change that rolled back.
+It is a signal, not a copy: it says that the lunch changed (and its status), and the
+browser then fetches the board from the API, which stays the only place the lunch's
+contents are read from. Only the server writes these (see firestore.rules), always
+after the change has committed, so nobody is told about a change that rolled back.
 """
 
 import logging
@@ -11,18 +12,17 @@ from uuid import UUID
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 
 from apps.accounts.models import User
 from apps.core import tenancy
 from apps.lunches.models import OrderSession, SessionMember
-from apps.lunches.queries import with_board
-from apps.lunches.serializers import LunchDetailSerializer
 
 logger = logging.getLogger(__name__)
 
 
 def publish(lunch: OrderSession) -> None:
-    """Refresh the lunch's board once the current transaction commits."""
+    """Tell listeners the lunch changed, once the current transaction commits."""
     if settings.FIRESTORE_ENABLED:
         org_id, lunch_id = lunch.org_id, lunch.id
         transaction.on_commit(lambda: _write(org_id, lunch_id))
@@ -43,9 +43,13 @@ def _write(org_id: UUID, lunch_id: UUID) -> None:
     from apps.core import firebase
 
     with tenancy.scoped(org_id):
-        lunch = with_board(OrderSession.objects.filter(id=lunch_id)).get()
+        lunch = OrderSession.objects.get(id=lunch_id)
         board = {
-            **LunchDetailSerializer(lunch).data,
+            "status": lunch.status,
+            # Changes on every write, so listeners hear about it even when the status
+            # is the same (a new pick, a tick).
+            "changed_at": timezone.now().isoformat(),
+            # Who may listen (firestore.rules).
             "org_id": str(org_id),
             "member_uids": member_uids(lunch),
         }

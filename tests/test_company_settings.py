@@ -1,7 +1,7 @@
 import pytest
 from django.core import mail
 
-from apps.accounts.models import Invite, OfficeAddress
+from apps.accounts.models import Address, Invite
 from apps.accounts.services import user_for_token
 from tests.conftest import client_for, make_user
 
@@ -13,40 +13,29 @@ def claims(email, uid):
 
 
 def test_everyone_sees_the_company_settings(company, member):
-    OfficeAddress.objects.create(org=company, address="4th floor")
+    Address.objects.create(org=company, address="4th floor")
 
     body = client_for(member).get(URL).json()
 
     assert body["name"] == "Acme"
-    assert body["radius_km"] == 3.0
-    assert body["restaurant_mode"] == "nearby"
+    assert "radius_km" not in body and "restaurant_mode" not in body
     assert [a["address"] for a in body["addresses"]] == ["4th floor"]
 
 
-def test_the_host_changes_the_lunch_defaults(admin):
+def test_the_host_changes_the_company_settings(admin):
     response = client_for(admin).patch(
         URL,
-        {
-            "name": "Acme Inc",
-            "team_name": "Platform",
-            "radius_km": 5,
-            "restaurant_mode": "manual",
-            "auto_join": False,
-            "office_lat": 10.0,
-            "office_lng": 76.3,
-        },
+        {"name": "Acme Inc", "team_name": "Platform", "auto_join": False},
         format="json",
     )
 
     assert response.status_code == 200
     body = response.json()
-    assert (body["name"], body["radius_km"], body["restaurant_mode"]) == (
+    assert (body["name"], body["team_name"], body["auto_join"]) == (
         "Acme Inc",
-        5.0,
-        "manual",
+        "Platform",
+        False,
     )
-    assert body["auto_join"] is False
-    assert body["office_lat"] == 10.0
 
 
 def test_settings_need_company_update(member):
@@ -64,13 +53,7 @@ def test_the_email_domain_cannot_change(admin, company):
 
 @pytest.mark.parametrize(
     "body",
-    [
-        {"radius_km": 20},
-        {"radius_km": 0.1},
-        {"name": ""},
-        {"office_lat": 95, "office_lng": 10},
-        {"office_lat": 10},  # latitude without longitude
-    ],
+    [{"name": ""}],
 )
 def test_settings_are_validated(admin, body):
     response = client_for(admin).patch(URL, body, format="json")
@@ -78,7 +61,7 @@ def test_settings_are_validated(admin, body):
     assert response.status_code == 400
 
 
-def test_office_addresses_are_added_and_removed(admin, company):
+def test_addresses_are_added_and_removed(admin, company):
     client = client_for(admin)
 
     added = client.post("/api/company/addresses", {"address": "Tower B"}, format="json")
@@ -90,16 +73,66 @@ def test_office_addresses_are_added_and_removed(admin, company):
     assert added.status_code == 201
     assert duplicate.status_code == 400
     assert removed.status_code == 204
-    assert not OfficeAddress.objects.filter(org=company).exists()
+    assert not Address.objects.filter(org=company).exists()
+
+
+def test_an_address_keeps_where_it_is(admin, company):
+    client = client_for(admin)
+
+    added = client.post(
+        "/api/company/addresses",
+        {"address": "Tower B", "lat": 10.0, "lng": 76.3},
+        format="json",
+    )
+
+    assert (added.json()["lat"], added.json()["lng"]) == (10.0, 76.3)
+    listed = client.get(URL).json()["addresses"]
+    assert [(a["address"], a["lat"], a["lng"]) for a in listed] == [
+        ("Tower B", 10.0, 76.3)
+    ]
+
+
+@pytest.mark.parametrize(
+    "where",
+    [{"lat": 10.0}, {"lng": 76.3}, {"lat": 95, "lng": 10}],
+    ids=["no longitude", "no latitude", "out of range"],
+)
+def test_an_address_needs_a_real_point_or_none(admin, where):
+    response = client_for(admin).post(
+        "/api/company/addresses", {"address": "Tower B", **where}, format="json"
+    )
+
+    assert response.status_code == 400
+
+
+def test_an_address_a_lunch_went_to_leaves_the_list_but_not_the_lunch(
+    admin, company, lunch
+):
+    address = lunch.address
+    address.saved = True
+    address.save()
+
+    removed = client_for(admin).delete(f"/api/company/addresses/{address.id}")
+
+    assert removed.status_code == 204
+    assert client_for(admin).get(URL).json()["addresses"] == []
+    lunch.refresh_from_db()
+    assert lunch.address == address
+    # Adding it again puts it back on the list.
+    again = client_for(admin).post(
+        "/api/company/addresses", {"address": address.address}, format="json"
+    )
+    assert again.status_code == 201
+    assert again.json()["id"] == str(address.id)
 
 
 def test_another_companys_address_is_out_of_reach(admin, other_company):
-    theirs = OfficeAddress.objects.create(org=other_company, address="Theirs")
+    theirs = Address.objects.create(org=other_company, address="Theirs")
 
     response = client_for(admin).delete(f"/api/company/addresses/{theirs.id}")
 
     assert response.status_code == 404
-    assert OfficeAddress.objects.filter(id=theirs.id).exists()
+    assert Address.objects.filter(id=theirs.id).exists()
 
 
 def test_invites_are_emailed_and_listed(admin, django_capture_on_commit_callbacks):
@@ -190,4 +223,19 @@ def test_the_dev_company_command_sets_up_the_dev_person(db, settings):
 
     from apps.accounts.models import ALL_PERMISSIONS, User
 
-    assert set(User.objects.get(email="dev@devco.io").permissions) == ALL_PERMISSIONS
+    dev = User.objects.get(email="dev@devco.io")
+    assert set(dev.permissions) == ALL_PERMISSIONS
+    assert [r.name for r in dev.roles.all()] == ["Host"]
+
+
+def test_the_dev_company_records_who_set_it_up(db, settings):
+    from django.core.management import call_command
+
+    from apps.accounts.models import Organization, User
+
+    settings.DEV_AUTH_EMAIL = "dev@devco.io"
+
+    call_command("dev_company")
+
+    org = Organization.objects.get(email_domain="devco.io")
+    assert org.created_by == User.objects.get(email="dev@devco.io")

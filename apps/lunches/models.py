@@ -1,8 +1,8 @@
-from django.core.validators import MaxValueValidator, MinValueValidator
+from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.db.models import Q
 
-from apps.accounts.models import Organization, User
+from apps.accounts.models import Address, Organization, User
 from apps.core.models import BaseModel
 
 
@@ -27,17 +27,9 @@ class OrderSession(BaseModel):
     # What the host calls it ("Friday biryani"); empty shows the host's name instead.
     name = models.CharField(max_length=80, blank=True)
     cutoff_at = models.DateTimeField()
-    delivery_address = models.TextField()
-    # Where the address is, when the host picked it from the suggestions.
-    delivery_lat = models.FloatField(
-        null=True,
-        blank=True,
-        validators=[MinValueValidator(-90), MaxValueValidator(90)],
-    )
-    delivery_lng = models.FloatField(
-        null=True,
-        blank=True,
-        validators=[MinValueValidator(-180), MaxValueValidator(180)],
+    # Where the food is delivered. Lunches keep it when it leaves the host's list.
+    address = models.ForeignKey(
+        Address, on_delete=models.PROTECT, related_name="lunches"
     )
     status = models.CharField(
         max_length=12, choices=SessionStatus.choices, default=SessionStatus.OPEN
@@ -45,14 +37,27 @@ class OrderSession(BaseModel):
     # The restaurants the host offered, as shown when it started (id, name, photo,
     # rating...; no menus), so everyone in the lunch sees the same list.
     offered_restaurants = models.JSONField(default=list, blank=True)
+    # Whether the link still lets new people in. The host can close it; it also stops
+    # at the cutoff, and once picks lock. People already in are not affected.
+    joining_open = models.BooleanField(default=True)
     # When the host closed it, after the food arrived and was handed out. A closed
     # lunch is over for everyone in it, in every browser.
     closed_at = models.DateTimeField(null=True, blank=True)
-    skipped_by = models.ManyToManyField(
-        User, related_name="skipped_lunches", db_table="order_session_skips", blank=True
+    # The host's ticks while running the lunch, kept here so every device (and a second
+    # host) sees them. Restaurants by the name people picked from, people by their id.
+    # Reviewing (step 2): this restaurant's dishes are right, this person's order is.
+    reviewed_restaurants = ArrayField(
+        models.CharField(max_length=200), default=list, blank=True
     )
+    reviewed_people = ArrayField(models.UUIDField(), default=list, blank=True)
+    # Collecting (step 4): the restaurants whose food has arrived.
+    arrived_restaurants = ArrayField(
+        models.CharField(max_length=200), default=list, blank=True
+    )
+    # Handing out (step 5): the people who have their food.
+    handed_out_people = ArrayField(models.UUIDField(), default=list, blank=True)
     # People whose picks are final for this lunch: they completed their order or
-    # skipped. Only the host can reopen them.
+    # skipped it (completed with no dishes). Only the host can reopen them.
     completed_by = models.ManyToManyField(
         User,
         related_name="completed_lunches",
@@ -65,13 +70,6 @@ class OrderSession(BaseModel):
         indexes = [
             models.Index(
                 fields=["org", "-created_at"], name="order_sessions_org_recent"
-            )
-        ]
-        constraints = [
-            models.CheckConstraint(
-                condition=Q(delivery_lat__isnull=True, delivery_lng__isnull=True)
-                | Q(delivery_lat__isnull=False, delivery_lng__isnull=False),
-                name="order_sessions_delivery_point_both_or_neither",
             )
         ]
 
@@ -92,7 +90,7 @@ class SessionMember(BaseModel):
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name="joined_sessions"
     )
-    # The lunch's org (the host's), so it can see who joined (migration 0008).
+    # The lunch's org (the host's), so it can see who joined.
     org = models.ForeignKey(
         "accounts.Organization", on_delete=models.CASCADE, related_name="+"
     )
@@ -117,7 +115,7 @@ class OrderStatus(models.TextChoices):
     DELIVERED = "delivered"
 
 
-class SwiggyOrder(BaseModel):
+class Order(BaseModel):
     """One Swiggy checkout; a lunch with more restaurants than one allows has several.
 
     The row's id doubles as the one-time key that stops the order being placed twice.
@@ -126,7 +124,7 @@ class SwiggyOrder(BaseModel):
     session = models.ForeignKey(
         OrderSession, on_delete=models.CASCADE, related_name="orders"
     )
-    swiggy_order_id = models.CharField(max_length=64, blank=True)
+    platform_order_id = models.CharField(max_length=64, blank=True)
     restaurant_count = models.PositiveSmallIntegerField()
     total_paise = models.PositiveIntegerField()
     status = models.CharField(
@@ -138,10 +136,10 @@ class SwiggyOrder(BaseModel):
     bot_steps = models.JSONField(default=list, blank=True)
 
     class Meta:
-        db_table = "swiggy_orders"
+        db_table = "orders"
 
     def __str__(self) -> str:
-        return f"Swiggy order {self.swiggy_order_id or self.id} ({self.status})"
+        return f"Order {self.platform_order_id or self.id} ({self.status})"
 
 
 class OrderItem(BaseModel):
@@ -152,7 +150,7 @@ class OrderItem(BaseModel):
     )
     user = models.ForeignKey(User, on_delete=models.PROTECT, related_name="order_items")
     order = models.ForeignKey(
-        SwiggyOrder,
+        Order,
         null=True,
         blank=True,
         on_delete=models.SET_NULL,

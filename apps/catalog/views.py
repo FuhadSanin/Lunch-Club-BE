@@ -7,6 +7,7 @@ from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.accounts.messages import not_allowed
 from apps.accounts.models import Permission
 from apps.accounts.services import is_public_email
 from apps.catalog import places, services
@@ -30,7 +31,7 @@ class CanBrowse(BasePermission):
     """People who pick food can browse: anyone in a company with the permission, and
     anyone with a public email (they host or join personal parties, with no company)."""
 
-    message = "You need the restaurant_read permission to do this."
+    message = not_allowed(Permission.RESTAURANT_READ)
 
     def has_permission(self, request, view) -> bool:
         user = request.user
@@ -66,6 +67,7 @@ def parse(serializer_class, request) -> dict:
 class CatalogAPIView(APIView):
     permission_classes = [IsAuthenticated, CanBrowse]
     required_permissions = {"GET": Permission.RESTAURANT_READ}
+    throttle_scope = "catalog"  # these call Swiggy
 
     def handle_exception(self, exc):
         if isinstance(exc, SwiggyError):
@@ -119,6 +121,8 @@ class PlaceSearchSerializer(serializers.Serializer):
 class PlacesView(CatalogAPIView):
     """GET /api/places?q=: places matching what is being typed, to pick an address."""
 
+    throttle_scope = "places"
+
     def get(self, request):
         query = parse(PlaceSearchSerializer, request)
         return Response(places.suggest(query["q"], query.get("lat"), query.get("lng")))
@@ -127,8 +131,10 @@ class PlacesView(CatalogAPIView):
 class PlaceView(CatalogAPIView):
     """GET /api/places/<place_id>: the address and coordinates of a suggested place."""
 
+    throttle_scope = "places"
+
     def get(self, request, place_id):
         found = places.detail(place_id)
         if found is None:
-            raise Http404("No such place.")
+            raise Http404("That place wasn't found. Search for it again.")
         return Response(found)

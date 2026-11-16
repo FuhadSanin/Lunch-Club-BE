@@ -53,6 +53,9 @@ class RunJobView(APIView):
 
     authentication_classes = [CloudTasksAuthentication]
     permission_classes = [IsAuthenticated]
+    # Cloud Tasks is a system, not a person: never rate limited (a refused job would not
+    # run, and the lunch would not lock at its cutoff).
+    throttle_classes: list = []
 
     def post(self, request, name: str):
         handler = jobs.registry.get(name)

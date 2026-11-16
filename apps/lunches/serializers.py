@@ -6,10 +6,10 @@ from django.core.validators import URLValidator
 from django.utils import timezone
 from rest_framework import serializers
 
-from apps.accounts.serializers import UserSerializer
+from apps.accounts.serializers import AddressSerializer, UserSerializer
 from apps.core import tenancy
 from apps.lunches.checkout import checkout_carts
-from apps.lunches.models import OrderItem, OrderSession, SessionMember, SwiggyOrder
+from apps.lunches.models import Order, OrderItem, OrderSession, SessionMember
 
 MAX_LEAD_TIME = timedelta(hours=24)
 
@@ -45,10 +45,17 @@ class OfferedRestaurantSerializer(serializers.Serializer):
         return url
 
 
+class JoiningSerializer(serializers.Serializer):
+    open = serializers.BooleanField()
+
+
 class StartLunchSerializer(serializers.ModelSerializer):
     name = serializers.CharField(
         max_length=80, trim_whitespace=True, allow_blank=True, required=False
     )
+    # Where to deliver: the address (and where it is, when picked from the place
+    # suggestions). It is kept in the company's addresses, which the lunch points at.
+    address = AddressSerializer()
     # many=True builds a ListSerializer, which takes max_length; the stubs don't know.
     offered_restaurants = OfferedRestaurantSerializer(  # type: ignore[call-arg]
         many=True, required=False, max_length=100
@@ -56,21 +63,7 @@ class StartLunchSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OrderSession
-        fields = [
-            "name",
-            "cutoff_at",
-            "delivery_address",
-            "delivery_lat",
-            "delivery_lng",
-            "offered_restaurants",
-        ]
-
-    def validate(self, attrs):
-        if (attrs.get("delivery_lat") is None) != (attrs.get("delivery_lng") is None):
-            raise serializers.ValidationError(
-                {"delivery_lat": "Give the address's latitude and longitude together."}
-            )
-        return attrs
+        fields = ["name", "cutoff_at", "address", "offered_restaurants"]
 
     def validate_cutoff_at(self, value):
         now = timezone.now()
@@ -113,6 +106,17 @@ class UnlockSerializer(serializers.Serializer):
         return StartLunchSerializer().validate_cutoff_at(value)
 
 
+class TickSerializer(serializers.Serializer):
+    """PUT /api/lunches/<id>/ticks: one thing the host ticks while running the lunch."""
+
+    kind = serializers.ChoiceField(
+        choices=["reviewed_restaurant", "reviewed_person", "arrived", "handed_out"]
+    )
+    # A restaurant's name (as people picked from it), or a person's id.
+    key = serializers.CharField(max_length=200, trim_whitespace=False)
+    done = serializers.BooleanField()
+
+
 class PicksSerializer(serializers.Serializer):
     """PUT /api/lunches/<id>/picks: your whole cart, and whether it's complete."""
 
@@ -121,16 +125,16 @@ class PicksSerializer(serializers.Serializer):
     complete = serializers.BooleanField(default=False)
 
 
-class SwiggyOrderSerializer(serializers.ModelSerializer):
+class OrderSerializer(serializers.ModelSerializer):
     restaurants = serializers.SerializerMethodField()
     carts = serializers.SerializerMethodField()
 
     class Meta:
-        model = SwiggyOrder
+        model = Order
         fields = [
             "id",
             "status",
-            "swiggy_order_id",
+            "platform_order_id",
             "restaurants",
             "carts",
             "restaurant_count",
@@ -141,10 +145,10 @@ class SwiggyOrderSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
-    def get_restaurants(self, order: SwiggyOrder) -> list[str]:
+    def get_restaurants(self, order: Order) -> list[str]:
         return sorted({item.restaurant_name for item in order.items.all()})
 
-    def get_carts(self, order: SwiggyOrder) -> list[dict]:
+    def get_carts(self, order: Order) -> list[dict]:
         return checkout_carts(order.items.all())
 
 
@@ -152,6 +156,7 @@ class LunchSerializer(serializers.ModelSerializer):
     """Pass `context={"user": the caller}` to fill in `joined`."""
 
     host = PersonSerializer(read_only=True)
+    address = AddressSerializer(read_only=True)
     org_kind = serializers.CharField(source="org.kind", read_only=True)
     joined = serializers.SerializerMethodField()
 
@@ -165,10 +170,9 @@ class LunchSerializer(serializers.ModelSerializer):
             "joined",
             "cutoff_at",
             "status",
-            "delivery_address",
-            "delivery_lat",
-            "delivery_lng",
+            "address",
             "offered_restaurants",
+            "joining_open",
             "closed_at",
             "created_at",
         ]
@@ -195,8 +199,8 @@ class LunchDetailSerializer(LunchSerializer):
     people = serializers.SerializerMethodField()
 
     items = ItemSerializer(many=True, read_only=True)
-    orders = SwiggyOrderSerializer(many=True, read_only=True)
-    skipped = PersonSerializer(source="skipped_by", many=True, read_only=True)
+    orders = OrderSerializer(many=True, read_only=True)
+    skipped = serializers.SerializerMethodField()
     completed = PersonSerializer(source="completed_by", many=True, read_only=True)
     total_paise = serializers.SerializerMethodField()
 
@@ -209,21 +213,36 @@ class LunchDetailSerializer(LunchSerializer):
             "completed",
             "orders",
             "total_paise",
+            "reviewed_restaurants",
+            "reviewed_people",
+            "arrived_restaurants",
+            "handed_out_people",
         ]
         read_only_fields = fields
 
     def get_people(self, lunch: OrderSession) -> list[dict]:
         # Memberships are visible to the lunch's own org; the caller already takes
         # part in this lunch (that is how they got its board), so read them as it.
-        with tenancy.reading_org(lunch.org_id):
-            joined = [
-                m.user
-                for m in SessionMember.objects.filter(session_id=lunch.id)
-                .select_related("user")
-                .order_by("user__name")
-            ]
+        # Someone of that org already reads as it, which saves three round trips.
+        user = self.context.get("user")
+        members = (
+            SessionMember.objects.filter(session_id=lunch.id)
+            .select_related("user")
+            .order_by("user__name")
+        )
+        if user is not None and user.org_id == lunch.org_id:
+            joined = [m.user for m in members]
+        else:
+            with tenancy.reading_org(lunch.org_id):
+                joined = [m.user for m in members]
         people = [lunch.host, *(u for u in joined if u.id != lunch.host_id)]
         return list(ContactSerializer(people, many=True).data)
+
+    def get_skipped(self, lunch: OrderSession) -> list[dict]:
+        """People sitting this lunch out: completed, with nothing picked."""
+        picked = {item.user_id for item in lunch.items.all()}
+        skipped = [p for p in lunch.completed_by.all() if p.id not in picked]
+        return list(PersonSerializer(skipped, many=True).data)
 
     def get_total_paise(self, lunch: OrderSession) -> int:
         return sum(item.total_paise for item in lunch.items.all())

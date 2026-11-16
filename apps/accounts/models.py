@@ -1,14 +1,9 @@
-from django.contrib.postgres.fields import ArrayField
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Q
+from django.db.models.functions import Lower
 
 from apps.core.models import BaseModel
-
-
-class RestaurantMode(models.TextChoices):
-    NEARBY = "nearby"  # every restaurant within radius_km of the office
-    MANUAL = "manual"  # the host picks them
 
 
 class OrgKind(models.TextChoices):
@@ -32,23 +27,9 @@ class Organization(BaseModel):
     # Unique among companies only; a personal org leaves it empty.
     email_domain = models.CharField(max_length=253, blank=True)
     auto_join = models.BooleanField(default=True)
-    # How a new lunch chooses its restaurants, and what "nearby" means.
-    restaurant_mode = models.CharField(
-        max_length=10, choices=RestaurantMode.choices, default=RestaurantMode.NEARBY
-    )
-    radius_km = models.FloatField(
-        default=3.0, validators=[MinValueValidator(0.5), MaxValueValidator(8.0)]
-    )
-    # Where restaurants and menus are looked up from; empty until the host sets it.
-    office_lat = models.FloatField(
-        null=True,
-        blank=True,
-        validators=[MinValueValidator(-90), MaxValueValidator(90)],
-    )
-    office_lng = models.FloatField(
-        null=True,
-        blank=True,
-        validators=[MinValueValidator(-180), MaxValueValidator(180)],
+    # Who set the company up (or whose party it is). Empty if that person is gone.
+    created_by = models.ForeignKey(
+        "User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+"
     )
 
     class Meta:
@@ -59,15 +40,6 @@ class Organization(BaseModel):
                 condition=Q(kind="company"),
                 name="organizations_company_domain_unique",
             ),
-            models.CheckConstraint(
-                condition=Q(radius_km__gte=0.5, radius_km__lte=8.0),
-                name="organizations_radius_range",
-            ),
-            models.CheckConstraint(
-                condition=Q(office_lat__isnull=True, office_lng__isnull=True)
-                | Q(office_lat__isnull=False, office_lng__isnull=False),
-                name="organizations_office_both_or_neither",
-            ),
         ]
 
     def __str__(self) -> str:
@@ -77,8 +49,9 @@ class Organization(BaseModel):
 class Permission(models.TextChoices):
     """Everything a person can be allowed to do, named `<resource>_<action>`.
 
-    Each API endpoint names the permission it needs (see `required_permissions` on the
-    views); the label says what it allows, for the screen where people get them.
+    People get permissions through roles (`Role`). Each API endpoint names the
+    permission it needs (see `required_permissions` on the views); the label says what
+    it allows, for the screen where roles are made.
     """
 
     SESSION_CREATE = "session_create", "Start a lunch"
@@ -100,17 +73,18 @@ class Permission(models.TextChoices):
     MEMBER_CREATE = "member_create", "Invite people to the company"
     MEMBER_READ = (
         "member_read",
-        "See everyone in the company, their permissions and invites",
+        "See everyone in the company, their roles and invites",
     )
-    MEMBER_UPDATE = "member_update", "Grant and remove people's permissions"
+    MEMBER_UPDATE = "member_update", "Make roles and give them to people"
     MEMBER_DELETE = "member_delete", "Withdraw invites"
     COMPANY_UPDATE = (
         "company_update",
-        "Change the company's settings and office addresses",
+        "Change the company's settings and addresses",
     )
 
 
-# What people get when they join a company. Whoever sets the company up gets everything.
+# What the Member role grants. Whoever sets a company up gets the Host role, which
+# grants everything.
 MEMBER_PERMISSIONS = frozenset(
     {
         Permission.SESSION_READ,
@@ -122,6 +96,56 @@ MEMBER_PERMISSIONS = frozenset(
     }
 )
 ALL_PERMISSIONS = frozenset(Permission)
+
+HOST_ROLE = "Host"
+MEMBER_ROLE = "Member"
+
+
+class Role(BaseModel):
+    """A named set of permissions inside one company, like "Auditor".
+
+    Every company has the two system roles, Host and Member, which can't be changed.
+    People with `member_update` can make more, and give people roles: what a person may
+    do is the union of the permissions of their roles (`RolePermission`, `UserRole`).
+    """
+
+    org = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name="roles"
+    )
+    name = models.CharField(max_length=60)
+    # Host and Member: made with the company, never renamed, edited or deleted.
+    is_system = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "roles"
+        constraints = [
+            models.UniqueConstraint(Lower("name"), "org", name="roles_org_name_unique")
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class RolePermission(BaseModel):
+    """One permission a role grants."""
+
+    role = models.ForeignKey(Role, on_delete=models.CASCADE, related_name="grants")
+    permission = models.CharField(max_length=40, choices=Permission.choices)
+
+    class Meta:
+        db_table = "role_permissions"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["role", "permission"], name="role_permissions_unique"
+            ),
+            models.CheckConstraint(
+                condition=Q(permission__in=Permission.values),
+                name="role_permissions_known",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.role_id} {self.permission}"
 
 
 class User(BaseModel):
@@ -136,46 +160,105 @@ class User(BaseModel):
     firebase_uid = models.CharField(max_length=128, unique=True)
     name = models.CharField(max_length=120, blank=True)
     email = models.EmailField(unique=True)
-    # What this person may do in their company; empty until they have one.
-    permissions = ArrayField(
-        models.CharField(max_length=40, choices=Permission.choices),
-        default=list,
-        blank=True,
-    )
+    # What this person is in their company; they get no permissions without one. The
+    # roles are all of the person's own company (the services keep it so).
+    roles = models.ManyToManyField(Role, through="UserRole", related_name="users")
 
     # Read by Django REST framework's permission checks.
     is_authenticated = True
 
     class Meta:
         db_table = "users"
-        constraints = [
-            models.CheckConstraint(
-                condition=Q(permissions__contained_by=Permission.values),
-                name="users_permissions_known",
-            )
-        ]
 
     def __str__(self) -> str:
         return self.email
 
+    @property
+    def permissions(self) -> list[str]:
+        """Everything this person may do: what their roles grant, together.
+
+        Read once per loaded person (or from `prefetch_related("roles__grants")`), and
+        again after `refresh_from_db`.
+        """
+        cached = self.__dict__.get("_permissions")
+        if cached is None:
+            if "roles" in getattr(self, "_prefetched_objects_cache", {}):
+                granted = {
+                    grant.permission
+                    for role in self.roles.all()
+                    for grant in role.grants.all()
+                }
+            else:  # one query, however many roles
+                granted = set(
+                    RolePermission.objects.filter(
+                        role__user_roles__user_id=self.id
+                    ).values_list("permission", flat=True)
+                )
+            cached = self.__dict__["_permissions"] = sorted(granted)
+        return cached
+
     def has_perm(self, permission: str) -> bool:
         return permission in self.permissions
 
+    def refresh_from_db(self, *args, **kwargs) -> None:
+        self.__dict__.pop("_permissions", None)
+        super().refresh_from_db(*args, **kwargs)
 
-class OfficeAddress(BaseModel):
-    """Where lunch can be delivered; the host picks one when starting a lunch."""
+
+class UserRole(BaseModel):
+    """A person has a role."""
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="user_roles")
+    role = models.ForeignKey(Role, on_delete=models.CASCADE, related_name="user_roles")
+
+    class Meta:
+        db_table = "user_roles"
+        constraints = [
+            models.UniqueConstraint(fields=["user", "role"], name="user_roles_unique")
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user_id} {self.role_id}"
+
+
+class Address(BaseModel):
+    """A place lunch is delivered to: the one table for every address.
+
+    A lunch points at its address, so where it was delivered is kept even after the
+    host takes the address off their list (`saved`). Coordinates are there when the
+    address was picked from the place suggestions; restaurants are looked up near them.
+    """
 
     org = models.ForeignKey(
         Organization, on_delete=models.CASCADE, related_name="addresses"
     )
     address = models.CharField(max_length=300)
+    lat = models.FloatField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(-90), MaxValueValidator(90)],
+    )
+    lng = models.FloatField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(-180), MaxValueValidator(180)],
+    )
+    # On the host's list of addresses to choose from. A lunch's address stays when it
+    # isn't (and one no lunch used is deleted instead of unsaved).
+    saved = models.BooleanField(default=True)
 
     class Meta:
-        db_table = "office_addresses"
+        db_table = "addresses"
+        verbose_name_plural = "addresses"
         constraints = [
             models.UniqueConstraint(
-                fields=["org", "address"], name="office_addresses_unique"
-            )
+                Lower("address"), "org", name="addresses_org_address_unique"
+            ),
+            models.CheckConstraint(
+                condition=Q(lat__isnull=True, lng__isnull=True)
+                | Q(lat__isnull=False, lng__isnull=False),
+                name="addresses_point_both_or_neither",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -233,7 +316,6 @@ class Notification(BaseModel):
     )
     title = models.CharField(max_length=200)
     body = models.CharField(max_length=400, blank=True)
-    link = models.CharField(max_length=500, blank=True)
     read_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -244,3 +326,26 @@ class Notification(BaseModel):
 
     def __str__(self) -> str:
         return self.title
+
+
+class ApiToken(BaseModel):
+    """The access token an AI assistant got by signing in (apps/oauth): it lets it,
+    through the MCP server, act as one person without a Google sign-in.
+
+    Only a SHA-256 hash is stored; the token itself is handed over once, when it is
+    made. The prefix (`lc_` and a few characters) recognises a token in the list.
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="api_tokens")
+    name = models.CharField(max_length=60)
+    prefix = models.CharField(max_length=16)
+    token_hash = models.CharField(max_length=64, unique=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "api_tokens"
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.prefix}…)"

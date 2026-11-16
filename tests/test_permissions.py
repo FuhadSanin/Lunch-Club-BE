@@ -1,11 +1,6 @@
-from datetime import timedelta
-
 import pytest
 from django.urls import URLResolver, get_resolver
-from django.utils import timezone
-from rest_framework.exceptions import PermissionDenied
 
-from apps.accounts import services
 from apps.accounts.models import ALL_PERMISSIONS, MEMBER_PERMISSIONS, Permission
 from apps.accounts.permissions import (
     HasRequiredPermission,
@@ -13,7 +8,7 @@ from apps.accounts.permissions import (
     MayTakePart,
 )
 from apps.catalog.views import CanBrowse
-from apps.lunches.models import OrderItem, SwiggyOrder
+from apps.lunches.models import Order, OrderItem
 from tests.conftest import client_for, make_user
 
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
@@ -24,6 +19,7 @@ ENDPOINTS = [
     ("post", "/api/lunches", Permission.SESSION_CREATE),
     ("get", "/api/lunches/{lunch}", Permission.SESSION_READ),
     ("post", "/api/lunches/{lunch}/lock", Permission.SESSION_UPDATE),
+    ("put", "/api/lunches/{lunch}/ticks", Permission.SESSION_UPDATE),
     ("post", "/api/lunches/{lunch}/cancel", Permission.SESSION_DELETE),
     ("post", "/api/lunches/{lunch}/items", Permission.PICK_CREATE),
     ("patch", "/api/lunches/{lunch}/items/{item}", Permission.PICK_UPDATE),
@@ -45,7 +41,11 @@ ENDPOINTS = [
     ("get", "/api/company/invites", Permission.MEMBER_READ),
     ("post", "/api/company/invites", Permission.MEMBER_CREATE),
     ("delete", "/api/company/invites/{member}", Permission.MEMBER_DELETE),
-    ("put", "/api/company/members/{member}/permissions", Permission.MEMBER_UPDATE),
+    ("get", "/api/company/roles", Permission.MEMBER_READ),
+    ("post", "/api/company/roles", Permission.MEMBER_UPDATE),
+    ("patch", "/api/company/roles/{member}", Permission.MEMBER_UPDATE),
+    ("delete", "/api/company/roles/{member}", Permission.MEMBER_UPDATE),
+    ("put", "/api/company/members/{member}/roles", Permission.MEMBER_UPDATE),
 ]
 
 
@@ -97,9 +97,7 @@ def ids(lunch, member):
         quantity=1,
         price_paise=32000,
     )
-    order = SwiggyOrder.objects.create(
-        session=lunch, restaurant_count=1, total_paise=32000
-    )
+    order = Order.objects.create(session=lunch, restaurant_count=1, total_paise=32000)
     return {"lunch": lunch.id, "item": item.id, "order": order.id, "member": member.id}
 
 
@@ -117,87 +115,6 @@ def test_each_action_needs_its_permission(company, ids, method, path, permission
 
     assert response.status_code == 403
     assert permission in response.json()["detail"]
-
-
-def set_permissions(by, person, permissions):
-    return client_for(by).put(
-        f"/api/company/members/{person.id}/permissions",
-        {"permissions": sorted(permissions)},
-        format="json",
-    )
-
-
-def test_granting_a_permission_lets_the_person_do_it(admin, member):
-    response = set_permissions(
-        admin, member, MEMBER_PERMISSIONS | {Permission.SESSION_CREATE}
-    )
-
-    assert response.status_code == 200
-    assert Permission.SESSION_CREATE in response.json()["permissions"]
-    member.refresh_from_db()  # a real request loads the person afresh
-    cutoff = timezone.now() + timedelta(hours=1)
-    started = client_for(member).post(
-        "/api/lunches",
-        {"cutoff_at": cutoff.isoformat(), "delivery_address": "Office"},
-        format="json",
-    )
-    assert started.status_code == 201
-
-
-def test_unknown_permissions_are_rejected(admin, member):
-    response = set_permissions(admin, member, {"session_read", "launch_missiles"})
-
-    assert response.status_code == 400
-
-
-def test_people_cannot_grant_permissions_they_do_not_have(company, member):
-    manager = make_user(
-        company, "Mona", MEMBER_PERMISSIONS | {Permission.MEMBER_UPDATE}
-    )
-
-    response = set_permissions(
-        manager, member, MEMBER_PERMISSIONS | {Permission.REVIEW_CREATE}
-    )
-
-    assert response.status_code == 403
-    assert Permission.REVIEW_CREATE in response.json()["detail"]
-    member.refresh_from_db()
-    assert Permission.REVIEW_CREATE not in member.permissions
-
-
-def test_people_cannot_remove_permissions_they_do_not_have(company, host):
-    manager = make_user(
-        company, "Mona", MEMBER_PERMISSIONS | {Permission.MEMBER_UPDATE}
-    )
-
-    response = set_permissions(manager, host, MEMBER_PERMISSIONS)
-
-    assert response.status_code == 403
-
-
-def test_the_last_person_who_can_change_permissions_keeps_that(admin):
-    response = set_permissions(
-        admin, admin, ALL_PERMISSIONS - {Permission.MEMBER_UPDATE}
-    )
-
-    assert response.status_code == 409
-    admin.refresh_from_db()
-    assert Permission.MEMBER_UPDATE in admin.permissions
-
-
-def test_changing_permissions_can_be_handed_over(admin, member):
-    assert set_permissions(admin, member, ALL_PERMISSIONS).status_code == 200
-
-    response = set_permissions(admin, admin, MEMBER_PERMISSIONS)
-
-    assert response.status_code == 200
-    assert response.json()["permissions"] == sorted(MEMBER_PERMISSIONS)
-
-
-def test_another_companys_person_is_out_of_reach(admin, other_company):
-    outsider = make_user(other_company, "Otto")
-
-    assert set_permissions(admin, outsider, ALL_PERMISSIONS).status_code == 404
 
 
 def test_people_see_their_own_permissions(member):
@@ -219,26 +136,28 @@ def test_a_method_the_view_does_not_name_is_refused(admin):
     assert client_for(admin).options("/api/lunches").status_code == 403
 
 
-def test_a_change_from_someone_who_just_lost_member_update_is_refused(company, member):
-    manager = make_user(company, "Mona", ALL_PERMISSIONS)
-    keeper = make_user(company, "Kai", ALL_PERMISSIONS)
-    services.set_permissions(keeper, manager, MEMBER_PERMISSIONS)
+def test_being_refused_says_what_you_cannot_do_and_who_can_fix_it(member):
+    response = client_for(member).post("/api/lunches", {}, format="json")
 
-    with pytest.raises(PermissionDenied):
-        services.set_permissions(manager, member, ALL_PERMISSIONS)
-
-
-def test_permission_changes_reach_firebase_for_the_board_rules(
-    admin, member, settings, monkeypatch, django_capture_on_commit_callbacks
-):
-    settings.FIRESTORE_ENABLED = True
-    sent = {}
-    monkeypatch.setattr(
-        services, "_set_claims", lambda uid, claims: sent.update(claims)
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Your role doesn't let you start a lunch. Ask a host to change your role. "
+        "(It needs session_create.)"
     )
 
-    with django_capture_on_commit_callbacks(execute=True):
-        set_permissions(admin, member, MEMBER_PERMISSIONS - {Permission.SESSION_READ})
 
-    assert sent["org_id"] == str(member.org_id)
-    assert Permission.SESSION_READ not in sent["permissions"]
+def test_every_permission_has_words_for_what_it_allows():
+    from apps.accounts.messages import not_allowed
+
+    for permission in Permission:
+        assert "do this" not in not_allowed(permission), permission
+
+
+def test_something_that_is_not_there_is_said_plainly(admin):
+    missing = "00000000-0000-0000-0000-000000000000"
+
+    response = client_for(admin).get(f"/api/lunches/{missing}")
+
+    assert response.status_code == 404
+    assert response.json()["detail"].startswith("We couldn't find that.")
+    assert "matches the given query" not in response.json()["detail"]

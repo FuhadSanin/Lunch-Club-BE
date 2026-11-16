@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.accounts import services as accounts
+from apps.accounts.messages import not_allowed
 from apps.accounts.models import Permission, User
 from apps.accounts.permissions import (
     CompanyAPIView,
@@ -17,10 +18,12 @@ from apps.lunches.models import OrderSession, SessionMember
 from apps.lunches.queries import with_board
 from apps.lunches.serializers import (
     ItemSerializer,
+    JoiningSerializer,
     LunchDetailSerializer,
     LunchSerializer,
     PicksSerializer,
     StartLunchSerializer,
+    TickSerializer,
     UnlockSerializer,
 )
 
@@ -86,9 +89,9 @@ class LunchesView(ParticipantAPIView):
         user = request.user
         if user.org_id is not None and not user.has_perm(Permission.SESSION_READ):
             self.permission_denied(
-                request, message="You need the session_read permission to do this."
+                request, message=not_allowed(Permission.SESSION_READ)
             )
-        lunches = participant_lunches(user).select_related("host", "org")
+        lunches = participant_lunches(user).select_related("host", "org", "address")
         lunches = lunches.order_by("-created_at")[:RECENT_LUNCHES]
         return Response(
             LunchSerializer(lunches, many=True, context={"user": user}).data
@@ -130,6 +133,7 @@ class JoinView(ParticipantAPIView):
     """
 
     required_permissions = {"POST": None, "DELETE": None}  # depends on the lunch
+    throttle_scope = "join"
 
     def post(self, request, lunch_id):
         lunch = services.join(request.user, lunch_id)
@@ -257,6 +261,21 @@ class SkipPersonView(CompanyAPIView):
         return board_response(lunch.id)
 
 
+class TicksView(CompanyAPIView):
+    """PUT /api/lunches/<id>/ticks: tick or untick what the host tracks while running
+    the lunch: a reviewed restaurant or person, a restaurant whose food arrived, a
+    person who has their food. Kept on the lunch, so every device shows the same."""
+
+    required_permissions = {"PUT": Permission.SESSION_UPDATE}
+
+    def put(self, request, lunch_id):
+        lunch = get_lunch_for_update(request, lunch_id)
+        serializer = TickSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        services.tick(lunch, **serializer.validated_data)
+        return board_response(lunch.id, user=request.user)
+
+
 class LockView(CompanyAPIView):
     """POST /api/lunches/<id>/lock: close picks before the cutoff."""
 
@@ -265,6 +284,20 @@ class LockView(CompanyAPIView):
     def post(self, request, lunch_id):
         lunch = get_lunch_for_update(request, lunch_id)
         services.lock(lunch)
+        return board_response(lunch.id)
+
+
+class JoiningView(CompanyAPIView):
+    """PUT /api/lunches/<id>/joining {"open": true|false}: let new people in through the
+    share link, or stop that. Only for a lunch still taking picks."""
+
+    required_permissions = {"PUT": Permission.SESSION_UPDATE}
+
+    def put(self, request, lunch_id):
+        serializer = JoiningSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        lunch = get_lunch_for_update(request, lunch_id)
+        services.set_joining(lunch, serializer.validated_data["open"])
         return board_response(lunch.id)
 
 

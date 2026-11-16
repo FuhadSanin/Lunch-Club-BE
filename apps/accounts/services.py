@@ -1,25 +1,25 @@
+import hashlib
+import secrets
 from collections.abc import Iterable
+from datetime import timedelta
 from functools import partial
 from uuid import UUID
 
 from django.conf import settings
-from django.db import transaction
-from django.db.models import Q
+from django.db import IntegrityError, transaction
 from django.utils import timezone
-from rest_framework.exceptions import (
-    AuthenticationFailed,
-    PermissionDenied,
-    ValidationError,
-)
+from rest_framework.exceptions import AuthenticationFailed, ValidationError
 
+from apps.accounts import rbac
 from apps.accounts.models import (
-    ALL_PERMISSIONS,
-    MEMBER_PERMISSIONS,
+    HOST_ROLE,
+    MEMBER_ROLE,
+    Address,
+    ApiToken,
     DeviceToken,
     Invite,
     Organization,
     OrgKind,
-    Permission,
     User,
 )
 from apps.core import notify
@@ -50,7 +50,7 @@ def user_for_token(claims: dict) -> User:
             kind=OrgKind.COMPANY, email_domain=email_domain(user.email)
         ).first()
         if org and _may_join(org, user.email):
-            _set_company(user, org, MEMBER_PERMISSIONS)
+            _set_company(user, org, MEMBER_ROLE)
     return user
 
 
@@ -123,7 +123,7 @@ def dev_user_claims(email: str) -> dict:
 
 
 def create_company(user: User, name: str) -> Organization:
-    """Set up the signed-in person's company; they get every permission in it."""
+    """Set up the signed-in person's company; they get the Host role (everything)."""
     if user.org_id:
         raise Conflict("You already belong to a company.")
     domain = email_domain(user.email)
@@ -134,8 +134,8 @@ def create_company(user: User, name: str) -> Organization:
         )
     if Organization.objects.filter(kind=OrgKind.COMPANY, email_domain=domain).exists():
         raise Conflict("A company for your email domain already exists.")
-    org = Organization.objects.create(name=name, email_domain=domain)
-    _set_company(user, org, ALL_PERMISSIONS)
+    org = Organization.objects.create(name=name, email_domain=domain, created_by=user)
+    _set_company(user, org, HOST_ROLE)
     return org
 
 
@@ -143,96 +143,85 @@ def create_personal_org(user: User) -> Organization:
     """The signed-in person's own party, made when they first host. Safe to repeat.
 
     Only people with a public email get one: everyone else is in, or sets up, their
-    company. They have every permission in it.
+    company. They get the Host role in it.
     """
     User.objects.select_for_update().get(id=user.id)  # two starts at once wait here
-    user.refresh_from_db(fields=["org", "permissions"])
+    user.refresh_from_db(fields=["org"])
     if user.org is not None:
         return user.org
     if not is_public_email(user.email):
         raise Conflict("Set up or join your company first.")
     first = (user.name or user.email.split("@")[0]).split()[0].title()
     org = Organization.objects.create(
-        name=f"{first}'s party", kind=OrgKind.PERSONAL, email_domain=""
+        name=f"{first}'s party",
+        kind=OrgKind.PERSONAL,
+        email_domain="",
+        created_by=user,
     )
-    _set_company(user, org, ALL_PERMISSIONS)
+    _set_company(user, org, HOST_ROLE)
     return org
 
 
-def set_permissions(granter: User, member: User, permissions: Iterable[str]) -> User:
-    """Replace a teammate's permissions.
-
-    People can only grant or remove permissions they have themselves, and someone in
-    the company must keep member_update so that permissions can still be changed.
-    """
-    wanted = set(permissions)
-    people = _lock_permission_holders(granter, member)
-    granter, member = people[granter.id], people[member.id]
-    if not granter.has_perm(Permission.MEMBER_UPDATE):  # lost it a moment ago
-        raise PermissionDenied(
-            f"You need the {Permission.MEMBER_UPDATE} permission to do this."
-        )
-    beyond_granter = (wanted ^ set(member.permissions)) - set(granter.permissions)
-    if beyond_granter:
-        raise PermissionDenied(
-            "You can only grant or remove permissions you have yourself: "
-            f"{', '.join(sorted(beyond_granter))}."
-        )
-    others_manage = any(
-        person.id != member.id and person.has_perm(Permission.MEMBER_UPDATE)
-        for person in people.values()
-    )
-    if Permission.MEMBER_UPDATE not in wanted and not others_manage:
-        raise Conflict(
-            f"Someone in the company must keep {Permission.MEMBER_UPDATE}, so that "
-            "permissions can still be changed."
-        )
-    member.permissions = sorted(wanted)
-    member.save(update_fields=["permissions", "updated_at"])
-    _sync_claims(member)
-    return member
-
-
-def _lock_permission_holders(granter: User, member: User) -> dict[UUID, User]:
-    """Lock both people and everyone who can change permissions, always in id order.
-
-    Two people taking member_update from each other at the same moment then run one
-    after the other, and the second sees that nobody else would be left with it.
-    """
-    holders = (
-        User.objects.select_for_update()
-        .filter(
-            Q(id__in=[granter.id, member.id])
-            | Q(org_id=member.org_id, permissions__contains=[Permission.MEMBER_UPDATE])
-        )
-        .order_by("id")
-    )
-    return {person.id: person for person in holders}
-
-
-def _set_company(user: User, org: Organization, permissions: Iterable[str]) -> None:
+def _set_company(user: User, org: Organization, role_name: str) -> None:
+    """Put a person in a company with one of its system roles (Host or Member)."""
     user.org = org
-    user.permissions = sorted(permissions)
-    user.save(update_fields=["org", "permissions", "updated_at"])
-    _sync_claims(user)
+    user.save(update_fields=["org", "updated_at"])
+    rbac.give_role(user, rbac.ensure_system_roles(org)[role_name])
 
 
-def _sync_claims(user: User) -> None:
-    """Copy the company and permissions onto the Firebase account, for Firestore."""
-    if not settings.FIRESTORE_ENABLED:
-        return
-    uid = user.firebase_uid
-    claims = {"org_id": str(user.org_id), "permissions": sorted(user.permissions)}
-    transaction.on_commit(lambda: _set_claims(uid, claims))
+def find_address(org_id: UUID, text: str) -> Address | None:
+    return Address.objects.filter(org_id=org_id, address__iexact=text).first()
 
 
-def _set_claims(firebase_uid: str, claims: dict) -> None:
-    """Firestore rules read these to show boards only to people allowed to see them."""
-    from firebase_admin import auth
+def save_address(
+    org_id: UUID,
+    text: str,
+    lat: float | None = None,
+    lng: float | None = None,
+    *,
+    saved: bool = True,
+) -> tuple[Address, bool]:
+    """The company's address with this text, made if it isn't there yet, and whether it
+    is newly on the host's list. Coordinates fill in what an address lacks, and a place
+    picked from the suggestions replaces what was typed. Safe to repeat."""
+    for _ in range(2):  # a second try when someone made the same address a moment ago
+        address = find_address(org_id, text)
+        try:
+            with transaction.atomic():
+                if address is None:
+                    address = Address.objects.create(
+                        org_id=org_id, address=text, lat=lat, lng=lng, saved=saved
+                    )
+                    return address, saved
+                return address, _update_address(address, lat, lng, saved=saved)
+        except IntegrityError:
+            continue
+    raise Conflict("This address is being added right now. Try again.")
 
-    from apps.core import firebase
 
-    auth.set_custom_user_claims(firebase_uid, claims, app=firebase.app())
+def _update_address(
+    address: Address, lat: float | None, lng: float | None, *, saved: bool
+) -> bool:
+    fields = []
+    if lat is not None and lng is not None and (address.lat, address.lng) != (lat, lng):
+        address.lat, address.lng = lat, lng
+        fields += ["lat", "lng"]
+    newly_listed = saved and not address.saved
+    if newly_listed:
+        address.saved = True
+        fields.append("saved")
+    if fields:
+        address.save(update_fields=[*fields, "updated_at"])
+    return newly_listed
+
+
+def unsave_address(address: Address) -> None:
+    """Take an address off the host's list; delete it if no lunch went there."""
+    if address.lunches.exists():
+        address.saved = False
+        address.save(update_fields=["saved", "updated_at"])
+    else:
+        address.delete()
 
 
 def _personal_party_id(user: User) -> UUID | None:
@@ -245,9 +234,16 @@ def _personal_party_id(user: User) -> UUID | None:
     return None
 
 
+# Browsers a person can have notifications on at once; the least recently seen go first.
+MAX_DEVICES = 10
+
+
 def subscribe_device(user: User, token: str) -> None:
     """Remember a device and subscribe it to what its person should hear."""
     DeviceToken.objects.update_or_create(token=token, defaults={"user": user})
+    newest = DeviceToken.objects.filter(user=user).order_by("-updated_at")
+    keep = list(newest.values_list("id", flat=True)[:MAX_DEVICES])
+    DeviceToken.objects.filter(user=user).exclude(id__in=keep).delete()
     if user.org_id and user.org and user.org.kind == OrgKind.COMPANY:
         notify.subscribe_to_company(token, user.org_id)
     if party_id := _personal_party_id(user):
@@ -261,3 +257,48 @@ def unsubscribe_device(user: User, token: str) -> None:
         notify.unsubscribe_from_company([token], user.org_id)
     if party_id := _personal_party_id(user):
         notify.unsubscribe_from_lunch([token], party_id)
+
+
+TOKEN_PREFIX = "lc_"  # noqa: S105  # nosec B105 (what tokens start with)
+# last_used_at is refreshed at most this often, so a busy assistant isn't a write per
+# call.
+TOUCH_EVERY = timedelta(minutes=1)
+
+
+def _hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def issue_api_token(user: User, name: str, lifetime: timedelta) -> tuple[ApiToken, str]:
+    """Make a token that lasts `lifetime`: the short-lived token an assistant gets by
+    signing in (apps/oauth); each one replaces the one before it."""
+    token = TOKEN_PREFIX + secrets.token_urlsafe(32)
+    row = ApiToken.objects.create(
+        user=user,
+        name=name.strip()[:60],
+        prefix=token[:11],
+        token_hash=_hash(token),
+        expires_at=timezone.now() + lifetime,
+    )
+    return row, token
+
+
+def user_for_api_token(token: str) -> User:
+    """The person an assistant's token belongs to, or AuthenticationFailed."""
+    row = (
+        ApiToken.objects.select_related("user", "user__org")
+        .filter(token_hash=_hash(token))
+        .first()
+    )
+    if row is None or row.revoked_at is not None:
+        raise AuthenticationFailed(
+            "That access token isn't valid. Connect the assistant again."
+        )
+    now = timezone.now()
+    if row.expires_at is not None and row.expires_at <= now:
+        raise AuthenticationFailed(
+            "That access token has expired. Connect the assistant again."
+        )
+    if row.last_used_at is None or now - row.last_used_at > TOUCH_EVERY:
+        ApiToken.objects.filter(id=row.id).update(last_used_at=now)
+    return row.user

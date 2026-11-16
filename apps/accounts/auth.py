@@ -3,9 +3,14 @@ from functools import cache
 
 from django.conf import settings
 from rest_framework.authentication import BaseAuthentication
-from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 
-from apps.accounts.services import dev_user_claims, user_for_token
+from apps.accounts.services import (
+    TOKEN_PREFIX,
+    dev_user_claims,
+    user_for_api_token,
+    user_for_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,38 @@ def verify_firebase_token(token: str) -> dict:
     if not claims.get("sub"):
         raise ValueError("Token has no user.")
     return {**claims, "uid": claims["sub"]}
+
+
+# What a personal access token may reach: the lunch itself, browsing, and notifications.
+# Never managing tokens, the company's settings and people, or permissions: those need a
+# real sign-in, so a leaked token can't mint more tokens or change who is in charge.
+TOKEN_ALLOWED_PATHS = (
+    "/api/me",
+    "/api/lunches",
+    "/api/orders",
+    "/api/restaurants",
+    "/api/dishes",
+    "/api/places",
+    "/api/notifications",
+)
+
+
+class ApiTokenAuthentication(BaseAuthentication):
+    """Authenticates `Authorization: Bearer lc_...`, a personal access token."""
+
+    def authenticate(self, request):
+        scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+        if scheme != "Bearer" or not token.startswith(TOKEN_PREFIX):
+            return None  # not ours: a Firebase sign-in token
+        path = request.path.rstrip("/")
+        if path.startswith("/api/me/") or not any(
+            path == p or path.startswith(p + "/") for p in TOKEN_ALLOWED_PATHS
+        ):
+            raise PermissionDenied("An access token can't be used for this.")
+        return user_for_api_token(token), {"access_token": True}  # nosec B105
+
+    def authenticate_header(self, request) -> str:
+        return "Bearer"
 
 
 class FirebaseAuthentication(BaseAuthentication):

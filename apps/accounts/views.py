@@ -1,33 +1,41 @@
+from django.db.models import Count, Prefetch
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.accounts import services
+from apps.accounts import rbac, services
+from apps.accounts.auth import DevAuthentication, FirebaseAuthentication
 from apps.accounts.models import (
+    Address,
+    ApiToken,
     Invite,
     Notification,
-    OfficeAddress,
     Organization,
     Permission,
+    Role,
     User,
 )
 from apps.accounts.permissions import CompanyAPIView
 from apps.accounts.serializers import (
+    AddressSerializer,
+    ApiTokenSerializer,
     CompanySettingsSerializer,
     InviteRequestSerializer,
     InviteSerializer,
     MarkReadSerializer,
+    MemberRolesSerializer,
     MeSerializer,
     NotificationSerializer,
-    OfficeAddressSerializer,
     OrganizationSerializer,
-    PermissionsSerializer,
     PushTokenSerializer,
+    RoleSerializer,
+    RoleWriteSerializer,
     UserSerializer,
 )
 from apps.core import tenancy
+from apps.oauth import services as oauth
 
 
 class MeView(APIView):
@@ -74,6 +82,36 @@ class PushTokenView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class TokensView(APIView):
+    """GET /api/me/tokens: the assistants connected to your account (one row for each
+    access token an assistant was given when you pressed Allow).
+
+    There is one way to connect: the assistant signs in (apps/oauth). This needs a real
+    sign-in: an access token can't list tokens.
+    """
+
+    authentication_classes = [FirebaseAuthentication, DevAuthentication]
+
+    def get(self, request):
+        mine = ApiToken.objects.filter(user=request.user, revoked_at__isnull=True)
+        return Response(
+            ApiTokenSerializer(mine.order_by("-created_at"), many=True).data
+        )
+
+
+class TokenView(APIView):
+    """DELETE /api/me/tokens/<id>: disconnect an assistant (its token stops working)."""
+
+    authentication_classes = [FirebaseAuthentication, DevAuthentication]
+
+    def delete(self, request, token_id):
+        row = get_object_or_404(
+            ApiToken, id=token_id, user=request.user, revoked_at__isnull=True
+        )
+        oauth.disconnect(row)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class NotificationsView(APIView):
     """GET /api/notifications: what you were told lately, newest first.
 
@@ -81,7 +119,7 @@ class NotificationsView(APIView):
     """
 
     def get(self, request):
-        mine = Notification.objects.filter(user=request.user)
+        mine = Notification.objects.filter(user=request.user).order_by("-created_at")
         return Response(
             {
                 "unread": mine.filter(read_at__isnull=True).count(),
@@ -104,30 +142,96 @@ class NotificationsReadView(APIView):
 
 
 class MembersView(CompanyAPIView):
-    """GET /api/company/members: everyone in the company, with their permissions."""
+    """GET /api/company/members: everyone in the company, with their roles."""
 
     required_permissions = {"GET": Permission.MEMBER_READ}
 
     def get(self, request):
-        members = User.objects.filter(org_id=request.user.org_id).order_by(
-            "name", "email"
+        members = (
+            User.objects.filter(org_id=request.user.org_id)
+            .prefetch_related("roles__grants")
+            .order_by("name", "email")
         )
         return Response(UserSerializer(members, many=True).data)
 
 
-class MemberPermissionsView(CompanyAPIView):
-    """PUT /api/company/members/<id>/permissions: set what a teammate may do."""
+class MemberRolesView(CompanyAPIView):
+    """PUT /api/company/members/<id>/roles: set a teammate's roles (`roles`: ids)."""
 
     required_permissions = {"PUT": Permission.MEMBER_UPDATE}
 
     def put(self, request, member_id):
         member = get_object_or_404(User, id=member_id, org_id=request.user.org_id)
-        serializer = PermissionsSerializer(data=request.data)
+        serializer = MemberRolesSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        member = services.set_permissions(
-            request.user, member, serializer.validated_data["permissions"]
+        member = rbac.set_roles(
+            request.user, member, serializer.validated_data["roles"]
         )
+        member = User.objects.prefetch_related("roles__grants").get(id=member.id)
         return Response(UserSerializer(member).data)
+
+
+def company_roles(org_id):
+    """The company's roles, with what each grants and how many people have it."""
+    return (
+        Role.objects.filter(org_id=org_id)
+        .prefetch_related("grants")
+        .annotate(members=Count("user_roles"))
+        .order_by("-is_system", "name")
+    )
+
+
+class RolesView(CompanyAPIView):
+    """GET /api/company/roles: the company's roles and what each allows.
+    POST: make a role (`name`, `permissions`)."""
+
+    required_permissions = {
+        "GET": Permission.MEMBER_READ,
+        "POST": Permission.MEMBER_UPDATE,
+    }
+
+    def get(self, request):
+        roles = company_roles(request.user.org_id)
+        return Response(RoleSerializer(roles, many=True).data)
+
+    def post(self, request):
+        serializer = RoleWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        role = rbac.create_role(
+            request.user,
+            serializer.validated_data["name"],
+            serializer.validated_data["permissions"],
+        )
+        saved = company_roles(request.user.org_id).get(id=role.id)
+        return Response(RoleSerializer(saved).data, status=status.HTTP_201_CREATED)
+
+
+class RoleView(CompanyAPIView):
+    """PATCH /api/company/roles/<id>: rename a role or change what it allows.
+    DELETE: delete a role nobody has."""
+
+    required_permissions = {
+        "PATCH": Permission.MEMBER_UPDATE,
+        "DELETE": Permission.MEMBER_UPDATE,
+    }
+
+    def patch(self, request, role_id):
+        role = get_object_or_404(Role, id=role_id, org_id=request.user.org_id)
+        serializer = RoleWriteSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        rbac.update_role(
+            request.user,
+            role,
+            name=serializer.validated_data.get("name"),
+            permissions=serializer.validated_data.get("permissions"),
+        )
+        saved = company_roles(request.user.org_id).get(id=role.id)
+        return Response(RoleSerializer(saved).data)
+
+    def delete(self, request, role_id):
+        role = get_object_or_404(Role, id=role_id, org_id=request.user.org_id)
+        rbac.delete_role(request.user, role)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class PermissionsView(CompanyAPIView):
@@ -142,7 +246,7 @@ class PermissionsView(CompanyAPIView):
 
 
 class CompanySettingsView(CompanyAPIView):
-    """GET /api/company/settings: the company, its lunch defaults and office addresses.
+    """GET /api/company/settings: the company, its lunch defaults and saved addresses.
 
     PATCH: change them.
     """
@@ -153,9 +257,10 @@ class CompanySettingsView(CompanyAPIView):
     }
 
     def company(self, request) -> Organization:
-        return Organization.objects.prefetch_related("addresses").get(
-            id=request.user.org_id
-        )
+        saved = Address.objects.filter(saved=True).order_by("created_at")
+        return Organization.objects.prefetch_related(
+            Prefetch("addresses", queryset=saved, to_attr="saved_addresses")
+        ).get(id=request.user.org_id)
 
     def get(self, request):
         return Response(CompanySettingsSerializer(self.company(request)).data)
@@ -170,39 +275,37 @@ class CompanySettingsView(CompanyAPIView):
 
 
 class AddressesView(CompanyAPIView):
-    """POST /api/company/addresses: add an office address."""
+    """POST /api/company/addresses: add an address to the list hosts choose from.
+
+    Send `lat` and `lng` too when it was picked from the place suggestions."""
 
     required_permissions = {"POST": Permission.COMPANY_UPDATE}
 
     def post(self, request):
-        serializer = OfficeAddressSerializer(data=request.data)
+        serializer = AddressSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        address = serializer.validated_data["address"]
-        if OfficeAddress.objects.filter(
-            org_id=request.user.org_id, address__iexact=address
-        ).exists():
+        data = serializer.validated_data
+        saved, newly_listed = services.save_address(
+            request.user.org_id, data["address"], data.get("lat"), data.get("lng")
+        )
+        if not newly_listed:
             return Response(
                 {"address": ["This address is already saved."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        saved = OfficeAddress.objects.create(
-            org_id=request.user.org_id, address=address
-        )
-        return Response(
-            OfficeAddressSerializer(saved).data, status=status.HTTP_201_CREATED
-        )
+        return Response(AddressSerializer(saved).data, status=status.HTTP_201_CREATED)
 
 
 class AddressView(CompanyAPIView):
-    """DELETE /api/company/addresses/<id>: remove an office address."""
+    """DELETE /api/company/addresses/<id>: take an address off the list.
+
+    Lunches that were delivered there keep it."""
 
     required_permissions = {"DELETE": Permission.COMPANY_UPDATE}
 
     def delete(self, request, address_id):
-        address = get_object_or_404(
-            OfficeAddress, id=address_id, org_id=request.user.org_id
-        )
-        address.delete()
+        address = get_object_or_404(Address, id=address_id, org_id=request.user.org_id)
+        services.unsave_address(address)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

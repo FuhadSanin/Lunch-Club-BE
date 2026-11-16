@@ -1,6 +1,5 @@
 """Personal parties: public-email hosts, lunches joined by link, and who sees what."""
 
-import importlib
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -9,7 +8,7 @@ from django.db import connection
 from django.utils import timezone
 
 from apps.accounts import services as accounts
-from apps.accounts.models import ALL_PERMISSIONS, Organization, OrgKind, User
+from apps.accounts.models import ALL_PERMISSIONS, Organization, OrgKind
 from apps.accounts.services import user_for_token
 from apps.core import tenancy
 from apps.lunches.models import OrderItem, OrderSession, SessionMember, SessionStatus
@@ -35,11 +34,12 @@ def person(name, domain="gmail.com"):
     )
 
 
-def start(user, **extra):
+def start(user, lat=None, lng=None, **extra):
     cutoff = timezone.now() + timedelta(hours=1)
+    where = {"address": "Home"} | ({"lat": lat, "lng": lng} if lat or lng else {})
     return client_for(user).post(
         "/api/lunches",
-        {"cutoff_at": cutoff.isoformat(), "delivery_address": "Home", **extra},
+        {"cutoff_at": cutoff.isoformat(), "address": where, **extra},
         format="json",
     )
 
@@ -71,9 +71,7 @@ def finished(party):
 def party(db):
     """Asha's personal party, with one lunch started."""
     asha = person("asha")
-    response = start(
-        asha, name="Friday biryani", delivery_lat=10.01, delivery_lng=76.36
-    )
+    response = start(asha, name="Friday biryani", lat=10.01, lng=76.36)
     assert response.status_code == 201
     return SimpleNamespace(
         host=asha, lunch_id=response.json()["id"], board=response.json()
@@ -87,9 +85,7 @@ def test_a_public_email_starts_a_lunch_in_a_personal_party_made_for_them(db):
     asha = person("asha")
     assert asha.org is None
 
-    response = start(
-        asha, name="Friday biryani", delivery_lat=10.01, delivery_lng=76.36
-    )
+    response = start(asha, name="Friday biryani", lat=10.01, lng=76.36)
 
     assert response.status_code == 201
     board = response.json()
@@ -97,13 +93,13 @@ def test_a_public_email_starts_a_lunch_in_a_personal_party_made_for_them(db):
     assert board["org_kind"] == "personal"
     assert board["joined"] is False
     assert board["host"]["name"] == "Asha"
-    assert board["delivery_address"] == "Home"
-    assert board["delivery_lat"] == 10.01
-    assert board["delivery_lng"] == 76.36
+    assert board["address"]["address"] == "Home"
+    assert (board["address"]["lat"], board["address"]["lng"]) == (10.01, 76.36)
     asha.refresh_from_db()
     assert asha.org.kind == OrgKind.PERSONAL
     assert asha.org.name == "Asha's party"
     assert asha.org.email_domain == ""
+    assert asha.org.created_by == asha
     assert set(asha.permissions) == ALL_PERMISSIONS
     me = client_for(asha).get("/api/me").json()
     assert me["org"]["kind"] == "personal"
@@ -118,8 +114,8 @@ def test_a_second_lunch_reuses_the_same_party(party):
     assert Organization.objects.filter(kind=OrgKind.PERSONAL).count() == 1
 
 
-def test_a_lunch_needs_both_coordinates_or_neither(db):
-    response = start(person("asha"), delivery_lat=10.0)
+def test_an_address_needs_both_coordinates_or_neither(db):
+    response = start(person("asha"), lat=10.0)
 
     assert response.status_code == 400
 
@@ -488,68 +484,6 @@ def test_joining_lets_go_of_the_link_when_it_is_done(db):
             assert c.fetchone()[0] == ""
 
 
-# --- the data migration -------------------------------------------------------
-
-
-def test_people_on_the_old_shared_gmail_org_each_get_their_own_party(db):
-    migration = importlib.import_module(
-        "apps.lunches.migrations.0007_personal_orgs_for_public_emails"
-    )
-    shared = Organization.objects.create(name="Gmail", email_domain="gmail.com")
-    asha = make_user(shared, "Asha")
-    bela = make_user(shared, "Bela")
-    lunch = OrderSession.objects.create(
-        org=shared,
-        host=asha,
-        cutoff_at=timezone.now() + timedelta(hours=1),
-        delivery_address="Home",
-    )
-    OrderItem.objects.create(
-        session=lunch,
-        user=bela,
-        restaurant_name="R",
-        dish_name="D",
-        quantity=1,
-        price_paise=100,
-    )
-    acme = Organization.objects.create(name="Acme", email_domain="acme.com")
-    colleague = make_user(acme, "Cleo")
-
-    from django.apps import apps
-
-    migration.give_public_email_people_their_own_party(
-        apps, SimpleNamespace(connection=connection)
-    )
-
-    asha, bela, colleague = (User.objects.get(id=u.id) for u in (asha, bela, colleague))
-    assert asha.org is not None and bela.org is not None
-    assert asha.org.kind == bela.org.kind == OrgKind.PERSONAL
-    assert asha.org_id != bela.org_id
-    assert asha.org.name == "Asha's party"
-    assert set(asha.permissions) == ALL_PERMISSIONS
-    lunch.refresh_from_db()
-    assert lunch.org_id == asha.org_id  # it moved with its host
-    assert OrderItem.objects.get(session=lunch).user_id == bela.id  # picks are kept
-    assert SessionMember.objects.filter(session=lunch, user=bela).exists()
-    assert colleague.org_id == acme.id  # company people are left alone
-    # Bela can still open it, through the membership.
-    assert client_for(bela).get(f"/api/lunches/{lunch.id}").status_code == 200
-
-
-def test_the_data_migration_does_nothing_without_a_shared_public_org(company):
-    from django.apps import apps
-
-    migration = importlib.import_module(
-        "apps.lunches.migrations.0007_personal_orgs_for_public_emails"
-    )
-
-    migration.give_public_email_people_their_own_party(
-        apps, SimpleNamespace(connection=connection)
-    )
-
-    assert Organization.objects.count() == 1
-
-
 def test_public_email_domains_can_be_listed_in_the_settings(settings):
     assert "gmail.com" in settings.PUBLIC_EMAIL_DOMAINS
     assert "acme.com" not in settings.PUBLIC_EMAIL_DOMAINS
@@ -834,4 +768,4 @@ def test_a_guest_joining_writes_the_live_board_with_who_may_read_it(
 
     board = written[party.lunch_id]
     assert board["member_uids"] == sorted([party.host.firebase_uid, guest.firebase_uid])
-    assert guest.email in [p["email"] for p in board["people"]]
+    assert "people" not in board  # nobody's name or email goes to Firestore

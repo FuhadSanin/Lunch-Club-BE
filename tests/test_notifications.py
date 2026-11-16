@@ -179,7 +179,7 @@ def test_nothing_is_sent_until_the_change_commits(
     with django_capture_on_commit_callbacks(execute=False):
         client_for(host).post(
             "/api/lunches",
-            {"cutoff_at": cutoff.isoformat(), "delivery_address": "Home"},
+            {"cutoff_at": cutoff.isoformat(), "address": {"address": "Home"}},
             format="json",
         )
 
@@ -232,7 +232,7 @@ def test_the_host_is_told_when_someone_joins_their_party(db):
     item = got["items"][0]
     assert item["title"] == "Gus joined your party"
     assert item["body"] == "Your lunch has 2 people now."
-    assert item["link"].endswith(f"/#/lunch/{_lunch().id}")
+    assert "link" not in item  # a line in the bell is about the lunch you are in
     assert bell(guest) == {"unread": 0, "items": []}
 
 
@@ -381,3 +381,24 @@ def test_completing_again_tells_the_host_nothing_new(db):
     client_for(gus).put(f"/api/lunches/{_lunch().id}/complete")
 
     assert len(titles(host)) == before
+
+
+def test_a_person_keeps_at_most_ten_devices_the_oldest_go_first(push, member):
+    for i in range(12):
+        register(member, f"device-{i}")
+
+    kept = set(DeviceToken.objects.filter(user=member).values_list("token", flat=True))
+
+    assert len(kept) == 10
+    assert kept == {f"device-{i}" for i in range(2, 12)}
+
+
+def test_registering_a_device_again_keeps_it_among_the_newest(push, member):
+    for i in range(10):
+        register(member, f"device-{i}")
+    register(member, "device-0")  # seen again: now the newest
+
+    register(member, "device-10")  # an 11th: the least recently seen goes
+
+    kept = set(DeviceToken.objects.filter(user=member).values_list("token", flat=True))
+    assert "device-0" in kept and "device-1" not in kept and len(kept) == 10

@@ -344,3 +344,22 @@ def test_a_place_from_another_provider_is_chosen_without_a_second_call(
     assert chosen.json()["lat"] == 10.01636
     assert len(calls) == made
     assert client.get("/api/places/M999").status_code == 404  # not one we suggested
+
+
+def test_every_search_reuses_one_connection_pool(company, member, osm):
+    client_for(member).get("/api/places", {"q": "infopark"})
+    first = places._client()
+    client_for(member).get("/api/places", {"q": "kakkanad"})
+
+    assert places._client() is first  # kept open, so no new handshake per search
+    assert not first.is_closed
+    assert len(osm.calls) == 2
+
+
+def test_a_search_gives_up_on_a_dead_server_quickly(settings):
+    settings.PLACES_TIMEOUT_SECONDS = 4
+
+    client = places._client()
+
+    assert client.timeout.connect == places.CONNECT_SECONDS
+    assert client.timeout.read == 4

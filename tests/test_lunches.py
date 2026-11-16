@@ -5,15 +5,16 @@ import pytest
 from django.core import mail
 from django.utils import timezone
 
+from apps.accounts.models import Address
 from apps.core import jobs, notify
 from apps.core.errors import RetryLater
 from apps.lunches import board, services
 from apps.lunches.jobs import lock_lunch
 from apps.lunches.models import (
+    Order,
     OrderItem,
     OrderSession,
     SessionStatus,
-    SwiggyOrder,
 )
 from tests.conftest import client_for, make_user
 
@@ -46,7 +47,7 @@ def test_host_starts_a_lunch(host, django_capture_on_commit_callbacks):
     with django_capture_on_commit_callbacks(execute=True):
         response = client_for(host).post(
             "/api/lunches",
-            {"cutoff_at": in_hours(2), "delivery_address": "Tower A"},
+            {"cutoff_at": in_hours(2), "address": {"address": "Tower A"}},
             format="json",
         )
 
@@ -59,10 +60,59 @@ def test_host_starts_a_lunch(host, django_capture_on_commit_callbacks):
     assert [row["id"] for row in listed] == [body["id"]]
 
 
+def test_a_lunch_points_at_its_address_in_the_companys_addresses(host, company):
+    started = client_for(host).post(
+        "/api/lunches",
+        {
+            "cutoff_at": in_hours(2),
+            "address": {"address": "Tower A", "lat": 10.0, "lng": 76.3},
+        },
+        format="json",
+    )
+
+    address = started.json()["address"]
+    assert (address["address"], address["lat"], address["lng"]) == (
+        "Tower A",
+        10.0,
+        76.3,
+    )
+    row = Address.objects.get(org=company)
+    assert str(row.id) == address["id"]
+    assert row.saved is False  # a lunch's address isn't added to the host's list
+    assert OrderSession.objects.get(id=started.json()["id"]).address == row
+    assert "delivery_address" not in started.json()
+
+
+def test_a_second_lunch_to_the_same_place_reuses_its_address(host, company):
+    body = {"cutoff_at": in_hours(2), "address": {"address": "Tower A"}}
+    first = client_for(host).post("/api/lunches", body, format="json").json()
+    OrderSession.objects.filter(id=first["id"]).update(status=SessionStatus.CANCELLED)
+
+    body["address"] = {"address": "tower a", "lat": 10.0, "lng": 76.3}
+    second = client_for(host).post("/api/lunches", body, format="json").json()
+
+    assert second["address"]["id"] == first["address"]["id"]
+    assert Address.objects.filter(org=company).count() == 1
+    # It learns where it is from the lunch that knew.
+    assert second["address"]["lat"] == 10.0
+
+
+def test_skipping_is_completing_with_nothing_picked(lunch, member):
+    other = make_user(lunch.org, "Gus")
+    pick(client_for(other), lunch)
+    client_for(other).put(f"/api/lunches/{lunch.id}/complete")
+    client_for(member).put(f"/api/lunches/{lunch.id}/skip")
+
+    board = client_for(member).get(f"/api/lunches/{lunch.id}").json()
+
+    assert {p["name"] for p in board["completed"]} == {"Gus", "Meera"}
+    assert [p["name"] for p in board["skipped"]] == ["Meera"]  # Gus picked a dish
+
+
 def test_starting_a_lunch_needs_session_create(member):
     response = client_for(member).post(
         "/api/lunches",
-        {"cutoff_at": in_hours(2), "delivery_address": "Tower A"},
+        {"cutoff_at": in_hours(2), "address": {"address": "Tower A"}},
         format="json",
     )
 
@@ -73,7 +123,7 @@ def test_starting_a_lunch_needs_session_create(member):
 def test_cutoff_must_be_within_the_next_day(host, hours):
     response = client_for(host).post(
         "/api/lunches",
-        {"cutoff_at": in_hours(hours), "delivery_address": "Tower A"},
+        {"cutoff_at": in_hours(hours), "address": {"address": "Tower A"}},
         format="json",
     )
 
@@ -265,10 +315,10 @@ def test_lock_splits_restaurants_into_checkouts_of_at_most_five(
     assert sorted(o["restaurant_count"] for o in orders) == [1, 5]
     assert sum(o["total_paise"] for o in orders) == 6 * 24000
     assert all(len(o["carts"]) == o["restaurant_count"] for o in orders)
-    assert SwiggyOrder.objects.count() == 2
+    assert Order.objects.count() == 2
     # Locking twice changes nothing.
     client_for(host).post(f"/api/lunches/{lunch.id}/lock")
-    assert SwiggyOrder.objects.count() == 2
+    assert Order.objects.count() == 2
 
 
 def test_lock_emails_the_host_to_confirm(
@@ -329,17 +379,15 @@ def test_a_confirmed_lunch_cannot_be_cancelled(lunch, host):
 
 def test_lunch_records_read_clearly(lunch, member):
     item = OrderItem.objects.create(session=lunch, user=member, order=None, **DISH)
-    order = SwiggyOrder.objects.create(
-        session=lunch, restaurant_count=1, total_paise=100
-    )
+    order = Order.objects.create(session=lunch, restaurant_count=1, total_paise=100)
 
     assert str(lunch).startswith("Lunch closing")
     assert "open" in str(lunch)
     assert str(item) == "2 × Masala Dosa from Dosa Hut"
     assert item.total_paise == 24000
     assert "pending" in str(order)
-    order.swiggy_order_id = "123"
-    assert str(order).startswith("Swiggy order 123")
+    order.platform_order_id = "123"
+    assert str(order).startswith("Order 123")
 
 
 def lock_with_a_pick(lunch, member, host):
@@ -549,8 +597,17 @@ def test_the_live_board_is_written_after_commit(
     with django_capture_on_commit_callbacks(execute=True):
         board.publish(lunch)
 
-    assert written[str(lunch.id)]["org_id"] == str(lunch.org_id)
-    assert written[str(lunch.id)]["items"][0]["dish_name"] == "Masala Dosa"
+    doc = written[str(lunch.id)]
+    assert doc["org_id"] == str(lunch.org_id)
+    assert doc["status"] == "open"
+    # A signal, not a copy: who may listen, the status and when it changed. What is in
+    # the lunch is only ever read from the API.
+    assert set(doc) == {"status", "changed_at", "org_id", "member_uids"}
+
+    first = doc["changed_at"]
+    with django_capture_on_commit_callbacks(execute=True):
+        board.publish(lunch)
+    assert written[str(lunch.id)]["changed_at"] > first  # every change is heard
 
 
 def test_a_failed_board_write_does_not_fail_the_change(
