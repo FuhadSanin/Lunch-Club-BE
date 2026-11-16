@@ -1,8 +1,10 @@
-# Group lunch backend
+# Tiffmate backend
 
-Django API for the multi-restaurant group lunch app: a host starts a lunch, the team picks
-dishes from any Swiggy restaurant, picks lock at the cutoff, and the app turns them into
-Swiggy orders (at most 5 restaurants per checkout).
+Django API and AI-assistant (MCP) server for [Tiffmate](https://tiffmate.vercel.app), group food ordering: a host
+starts a food party, the team picks dishes from Swiggy restaurants (or a local menu), picks lock at the cutoff,
+and the host places the orders. The web app is the sibling repo `lunch-board`; its README explains the product,
+where it stands, and what is left before applying to Swiggy Builders Club (checklist: `docs/swiggy-builders-club.md`,
+database move: `docs/database-migration.md`).
 
 Behaviour is specified in [`openspec/specs`](openspec/specs); design decisions are in
 [`openspec/changes/archive/2026-11-03-add-group-lunch-backend/design.md`](openspec/changes/archive/2026-11-03-add-group-lunch-backend/design.md).
@@ -43,6 +45,7 @@ company always keeps at least one person with `member_update`. The rules live in
 | Method | Path | Permission | What |
 |---|---|---|---|
 | GET | `/api/me` | signed in | You, your org (`org: null` until set up or until a public-email person hosts), `org.kind` (`company` or `personal`), `public_email`, your roles, and the permissions they give |
+| DELETE | `/api/me` | signed in | Delete your account: name, email, sign-in, devices, notifications, assistant access, local menus and picks in open food parties go; finished food parties keep an anonymous "Former member" record. 409 while you host a food party that is not over, or your food is being ordered |
 | POST | `/api/me/push-token` | in a company | Subscribe this device to company notifications |
 | POST | `/api/company` | no company yet | Set up your company; you get the Host role (public emails like Gmail can't: they host a personal party instead) |
 | GET | `/api/permissions` | in a company | Every permission and what it allows |
@@ -300,6 +303,9 @@ and Google Cloud).
    `migrate` only.
 3. Check it: `... manage.py check_rls` says the role is subject to row-level security.
 4. Set `REQUIRE_RLS=true` in Vercel, so the app refuses to start as a role that can skip it.
+
+**Moving the database to another region** (Neon has no Mumbai; Singapore is the nearest): see
+[docs/database-migration.md](docs/database-migration.md) and `scripts/migrate_database.sh`.
 
 **Do once: secrets.** Reset the Neon password (Neon, Branch, Roles, Reset password) if it
 has ever been in a chat or a terminal. Keep `FIREBASE_CREDENTIALS_JSON`,

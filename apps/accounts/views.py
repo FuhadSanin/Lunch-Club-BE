@@ -5,7 +5,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.accounts import rbac, services
+from apps.accounts import erasure, rbac, services
 from apps.accounts.auth import DevAuthentication, FirebaseAuthentication
 from apps.accounts.models import (
     Address,
@@ -39,10 +39,21 @@ from apps.oauth import services as oauth
 
 
 class MeView(APIView):
-    """GET /api/me: the signed-in person and their company (null until set up)."""
+    """GET /api/me: the signed-in person and their company (null until set up).
+
+    DELETE /api/me: delete the account and what identifies the person (erasure.py)."""
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        tenancy.activate(request.user.org_id, request.user.id)
 
     def get(self, request):
         return Response(MeSerializer(request.user).data)
+
+    def delete(self, request):
+        uid = erasure.delete_account(request.user)
+        erasure.remove_sign_in(uid)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class CompanyView(APIView):
