@@ -1,4 +1,4 @@
-"""Run the Lunch Club MCP server.
+"""Run the Tiffmate MCP server.
 
     python -m mcp_server                  for one person on their own computer (stdio);
                                           set LUNCHCLUB_TOKEN to their access token
@@ -17,7 +17,7 @@ from mcp_server.server import Config, create_server
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Lunch Club MCP server")
+    parser = argparse.ArgumentParser(description="Tiffmate MCP server")
     parser.add_argument(
         "--http", action="store_true", help="serve over HTTP, not stdio"
     )

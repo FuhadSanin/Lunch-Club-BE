@@ -190,13 +190,13 @@ check the policies as a normal user.
 6. In Firebase Hosting, rewrite `/api/**` to the Cloud Run service so the web app calls
    the API on its own origin (no CORS needed).
 
-## MCP server (use Lunch Club from an AI assistant)
+## MCP server (use Tiffmate from an AI assistant)
 
 `mcp_server/` lets an AI assistant (Claude Code, Claude Desktop, Cursor, ...) run a lunch
 for one person: start it from a prompt, share the link, join and pick dishes, lock and
 confirm, record orders. It is a thin layer over the REST API: every tool makes the same
 calls the web app does, as the signed-in person (the access token their assistant got when they pressed Allow), so it can do
-only what that person can. 23 tools (`whoami`, `start_lunch`, `share_lunch`, `join_lunch`,
+only what that person can. 26 tools (`whoami`, `start_lunch`, `share_lunch`, `join_lunch`,
 `find_restaurants`, `get_menu`, `pick_dish`, `lock_lunch`, `confirm_lunch`, ...) and two
 prompts (`start_team_lunch`, `pick_my_lunch`). `confirm_lunch` and `cancel_lunch` refuse
 until called with `confirm=true`, which the assistant should only do after asking.
@@ -220,6 +220,23 @@ Connect to an AI assistant (they appear in its list under the app's name, with a
 button). Signing in is the only way to connect: there are no tokens to make or copy. Only a
 token's SHA-256 is stored.
 
+**Local menus.** A host keeps the menu of a restaurant that isn't on Swiggy (`LocalMenu`: name, picture, rating,
+distance, and dishes with prices and optional pictures), by hand in the web app or through their AI assistant
+(`add_local_menu`, `list_local_menus`, `delete_local_menu`). `GET/POST /api/local-menus` and
+`GET/PUT/DELETE /api/local-menus/<id>` are the owner's only. Starting a party with `local_menu_ids` copies those
+menus into the party's offered restaurants (id `local-<menu id>`, `local: true`, the dishes inside), so everyone in
+it sees the same menu; later edits don't change a party already started. Picks from a local restaurant keep that id.
+At lock each local restaurant gets an order of its own, never mixed into a Swiggy checkout, and placing it hands
+it to the host ("order it directly, then mark it as ordered"). Pictures are an https link or a small data URL.
+
+**History.** `GET /api/lunches/<id>/history` is the receipt of a lunch: its name, what each person ordered and owes the
+host, and the restaurants (details, Swiggy order number). Only the host who ran that lunch gets it (403 for everyone else,
+other hosts included); the web app's Start lunch, History tab uses it.
+
+**History.** `GET /api/lunches/<id>/history` is the receipt of a lunch: its name, what each person ordered and owes the
+host, and the restaurants (details, Swiggy order number). Only the host who ran that lunch gets it (403 for everyone
+else, other hosts included); the web app's Start lunch, History tab uses it.
+
 **On Vercel, with the API (the setup in use).** `config/mcp_mount.py` serves `/mcp` and
 `/.well-known/oauth-protected-resource` from the API's own WSGI app, so there is no second service. The web
 app forwards its own `/mcp` to the API (`lunch-board/vercel.json`), so people and assistants only see
@@ -241,7 +258,7 @@ MCP_ALLOWED_HOSTS=<this host> uv run --group mcp python -m mcp_server --http --p
 docker build -f Dockerfile.mcp -t lunchclub-mcp .      # the same, as a small image
 ```
 
-Connect a client by signing in: `claude mcp add --transport http lunchclub
+Connect a client by signing in: `claude mcp add --transport http tiffmate
 https://<mcp-host>/mcp`, then `/mcp` in Claude Code and Authenticate; in claude.ai or
 Claude Desktop, Settings, Connectors, Add custom connector, paste the address. That is the one
 way to connect; the web app's Connect to an AI assistant page explains it with examples and lists
@@ -290,6 +307,6 @@ has ever been in a chat or a terminal. Keep `FIREBASE_CREDENTIALS_JSON`,
 
 **Do once: restrict the Firebase web API key.** Google Cloud Console, APIs & Services,
 Credentials, open the "Browser key" (the one in `lunch-board/src/lib/firebase.ts`),
-Application restrictions: Websites, add `https://lunchclubfe.vercel.app/*` and
+Application restrictions: Websites, add `https://tiffmate.vercel.app/*` and
 `http://localhost:5173/*`. Under API restrictions allow only Identity Toolkit, Token
 Service, Firebase Installations and Firebase Cloud Messaging Registration.

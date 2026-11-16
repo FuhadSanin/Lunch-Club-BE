@@ -92,7 +92,7 @@ def _page(message: str, status: int = 400) -> HttpResponse:
     """A plain page for a problem the person must see here: the request can't be trusted
     enough to send them back to the app."""
     return HttpResponse(
-        f"<!doctype html><meta charset=utf-8><title>Lunch Club</title>"
+        f"<!doctype html><meta charset=utf-8><title>Tiffmate</title>"
         "<body style='font:16px system-ui;max-width:32rem;margin:4rem auto'>"
         f"<h1>Can't sign in</h1><p>{escape(message)}</p>",
         status=status,

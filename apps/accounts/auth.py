@@ -55,6 +55,7 @@ def verify_firebase_token(token: str) -> dict:
 TOKEN_ALLOWED_PATHS = (
     "/api/me",
     "/api/lunches",
+    "/api/local-menus",
     "/api/orders",
     "/api/restaurants",
     "/api/dishes",

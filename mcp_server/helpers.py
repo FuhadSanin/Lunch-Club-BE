@@ -56,7 +56,7 @@ def lunch_id_from(text: str) -> str:
     found = UUID_IN_TEXT.search(text or "")
     if not found:
         raise ToolError(
-            "I couldn't find a lunch id in that. Use the lunch's link or id."
+            "I couldn't find a food party id in that. Use the food party's link or id."
         )
     return str(UUID(found.group(0)))
 

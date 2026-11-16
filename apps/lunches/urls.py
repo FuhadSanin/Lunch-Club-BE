@@ -3,8 +3,11 @@ from django.urls import path
 from apps.lunches import views
 
 urlpatterns = [
+    path("local-menus", views.LocalMenusView.as_view()),
+    path("local-menus/<uuid:menu_id>", views.LocalMenuView.as_view()),
     path("lunches", views.LunchesView.as_view()),
     path("lunches/<uuid:lunch_id>", views.LunchView.as_view()),
+    path("lunches/<uuid:lunch_id>/history", views.HistoryView.as_view()),
     path("lunches/<uuid:lunch_id>/join", views.JoinView.as_view()),
     path("lunches/<uuid:lunch_id>/items", views.ItemsView.as_view()),
     path("lunches/<uuid:lunch_id>/items/<uuid:item_id>", views.ItemView.as_view()),

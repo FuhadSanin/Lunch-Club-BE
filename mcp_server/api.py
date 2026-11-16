@@ -1,4 +1,4 @@
-"""A small client for the Lunch Club REST API, used by the MCP tools."""
+"""A small client for the Tiffmate REST API, used by the MCP tools."""
 
 from typing import Any
 
@@ -6,13 +6,13 @@ import httpx
 from mcp.server.mcpserver.exceptions import ToolError
 
 MISSING = (
-    "You're not signed in to Lunch Club. Connect the assistant again: add this server "
+    "You're not signed in to Tiffmate. Connect the assistant again: add this server "
     "in your assistant and press Connect, then Allow (Connect to an AI assistant, in "
-    "Lunch Club, shows how)."
+    "Tiffmate, shows how)."
 )
 REJECTED = (
-    "Lunch Club didn't accept that sign-in. It may have expired or been ended: connect "
-    "the assistant again (Connect to an AI assistant, in Lunch Club)."
+    "Tiffmate didn't accept that sign-in. It may have expired or been ended: connect "
+    "the assistant again (Connect to an AI assistant, in Tiffmate)."
 )
 
 
@@ -52,7 +52,7 @@ class Api:
                     json=json,
                 )
         except httpx.HTTPError as error:
-            raise ToolError(f"Couldn't reach Lunch Club: {error}") from error
+            raise ToolError(f"Couldn't reach Tiffmate: {error}") from error
         if response.status_code == 401:
             raise ToolError(REJECTED)
         if response.status_code >= 400:
@@ -81,5 +81,5 @@ def _message(response: httpx.Response) -> str:
             f"{field}: {_text(problem)}" for field, problem in body.items()
         )
     if response.status_code == 404:
-        return "Lunch Club couldn't find that (or you can't see it)."
-    return f"Lunch Club answered HTTP {response.status_code}."
+        return "Tiffmate couldn't find that (or you can't see it)."
+    return f"Tiffmate answered HTTP {response.status_code}."

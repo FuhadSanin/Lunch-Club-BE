@@ -94,7 +94,7 @@ def test_wildcard_allowed_hosts_are_flagged_in_production(settings):
     from apps.core import checks
 
     settings.DEBUG = False
-    settings.ALLOWED_HOSTS = [".vercel.app", "lunchclubbe.vercel.app", "*"]
+    settings.ALLOWED_HOSTS = [".vercel.app", "tiffmate-api.vercel.app", "*"]
 
     found = checks.no_wildcard_hosts(None)
 
@@ -106,7 +106,7 @@ def test_exact_hosts_and_local_development_are_fine(settings):
     from apps.core import checks
 
     settings.DEBUG = False
-    settings.ALLOWED_HOSTS = ["lunchclubbe.vercel.app", "localhost"]
+    settings.ALLOWED_HOSTS = ["tiffmate-api.vercel.app", "localhost"]
     assert checks.no_wildcard_hosts(None) == []
 
     settings.DEBUG = True

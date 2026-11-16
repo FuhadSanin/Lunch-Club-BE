@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 from urllib.parse import quote
 
+from apps.lunches.local_menus import is_local
 from apps.lunches.models import OrderItem
 
 
@@ -47,10 +48,13 @@ def _cart(name: str, picks: list[OrderItem]) -> dict:
         + (f" · Note: {notes[person]}" if person in notes else "")
         for person, food in sorted(foods.items())
     )
+    local = is_local(restaurant_id)
     return {
         "restaurant_name": name,
         "restaurant_id": restaurant_id,
-        "swiggy_url": swiggy_url(name, restaurant_id),
+        # A local menu isn't on Swiggy: the host orders it directly with the restaurant.
+        "local": local,
+        "swiggy_url": "" if local else swiggy_url(name, restaurant_id),
         "dishes": list(dishes.values()),
         "cooking_note": note,
         "total_paise": sum(p.total_paise for p in picks),

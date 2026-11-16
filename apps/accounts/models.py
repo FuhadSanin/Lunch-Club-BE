@@ -54,16 +54,16 @@ class Permission(models.TextChoices):
     it allows, for the screen where roles are made.
     """
 
-    SESSION_CREATE = "session_create", "Start a lunch"
-    SESSION_READ = "session_read", "See lunches and their live boards"
-    SESSION_UPDATE = "session_update", "Lock a lunch's picks before the cutoff"
-    SESSION_DELETE = "session_delete", "Cancel a lunch that isn't ordered yet"
-    PICK_CREATE = "pick_create", "Pick dishes for a lunch"
-    PICK_UPDATE = "pick_update", "Change their picks, or skip a lunch"
+    SESSION_CREATE = "session_create", "Start a party"
+    SESSION_READ = "session_read", "See parties and their live boards"
+    SESSION_UPDATE = "session_update", "Lock a party's picks before the cutoff"
+    SESSION_DELETE = "session_delete", "Cancel a party that isn't ordered yet"
+    PICK_CREATE = "pick_create", "Pick dishes for a party"
+    PICK_UPDATE = "pick_update", "Change their picks, or skip a party"
     PICK_DELETE = "pick_delete", "Remove their picks"
     REVIEW_CREATE = (
         "review_create",
-        "Confirm a locked lunch's cart, so its orders go out",
+        "Confirm a locked party's cart, so its orders go out",
     )
     ORDER_UPDATE = (
         "order_update",

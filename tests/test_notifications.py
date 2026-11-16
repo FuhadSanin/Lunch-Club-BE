@@ -124,7 +124,7 @@ def test_the_host_gets_a_push_on_their_own_devices_when_someone_joins(
     assert len(push.sent) == 1
     message = push.sent[0]
     assert message.tokens == ["host-device"]
-    assert message.notification.title == "Gus joined your party"
+    assert message.notification.title == "Gus joined your food party"
     assert message.webpush.fcm_options.link.endswith(f"/lunch/{_lunch().id}")
 
 
@@ -230,8 +230,8 @@ def test_the_host_is_told_when_someone_joins_their_party(db):
     got = bell(host)
     assert got["unread"] == 1
     item = got["items"][0]
-    assert item["title"] == "Gus joined your party"
-    assert item["body"] == "Your lunch has 2 people now."
+    assert item["title"] == "Gus joined your food party"
+    assert item["body"] == "Your food party has 2 people now."
     assert "link" not in item  # a line in the bell is about the lunch you are in
     assert bell(guest) == {"unread": 0, "items": []}
 
@@ -267,7 +267,7 @@ def test_tell_participants_reaches_everyone_in_a_party(db):
     assert [i["title"] for i in bell(guest)["items"]] == ["Lunch is ordered"]
     assert [i["title"] for i in bell(host)["items"]] == [
         "Lunch is ordered",
-        "Gus joined your party",
+        "Gus joined your food party",
     ]
     assert bell(stranger) == {"unread": 0, "items": []}
 
@@ -292,7 +292,7 @@ def test_marking_some_read_and_then_all(db):
 
     client.post("/api/notifications/read", {}, format="json")
     assert bell(member)["unread"] == 0
-    assert second["title"] == "Ivy joined your party"
+    assert second["title"] == "Ivy joined your food party"
 
 
 def test_someone_cannot_mark_another_persons_notifications_read(db):

@@ -1,8 +1,10 @@
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from apps.accounts import services as accounts
 from apps.accounts.messages import not_allowed
@@ -13,8 +15,15 @@ from apps.accounts.permissions import (
     ParticipantAPIView,
 )
 from apps.core import tenancy
+from apps.core.errors import Conflict
 from apps.lunches import services
-from apps.lunches.models import OrderSession, SessionMember
+from apps.lunches.history import lunch_receipt
+from apps.lunches.local_menus import (
+    MAX_MENUS,
+    LocalMenuSerializer,
+    local_offered,
+)
+from apps.lunches.models import LocalMenu, OrderSession, SessionMember
 from apps.lunches.queries import with_board
 from apps.lunches.serializers import (
     ItemSerializer,
@@ -101,11 +110,18 @@ class LunchesView(ParticipantAPIView):
         user = request.user
         serializer = StartLunchSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        data = dict(serializer.validated_data)
+        local_ids = data.pop("local_menu_ids", [])
+        if local_ids:
+            data["offered_restaurants"] = [
+                *data.get("offered_restaurants", []),
+                *local_offered(user, local_ids),
+            ]
         if user.org_id is None:
             services.ensure_free(user)  # before making their party, not after
             accounts.create_personal_org(user)
             tenancy.activate(user.org_id, user.id)  # the party is new
-        lunch = services.start(user, **serializer.validated_data)
+        lunch = services.start(user, **data)
         return board_response(lunch.id, status.HTTP_201_CREATED, user)
 
 
@@ -122,6 +138,85 @@ class LunchView(ParticipantAPIView):
         self.check_on_lunch(request, lunch)
         data = LunchDetailSerializer(lunch, context={"user": request.user}).data
         return Response(data)
+
+
+class HistoryView(ParticipantAPIView):
+    """GET /api/lunches/<id>/history: the receipt of a lunch, for the host who ran it:
+    what each person ordered, the restaurants, and how much each person owes. Nobody
+    else gets it, not even another host of the company."""
+
+    required_permissions = {"GET": None}
+
+    def get(self, request, lunch_id):
+        lunch = get_object_or_404(
+            participant_lunches(request.user, with_board(OrderSession.objects.all())),
+            id=lunch_id,
+        )
+        if lunch.host_id != request.user.id:
+            raise PermissionDenied(
+                "Only the person who hosted this food party can see it."
+            )
+        return Response(lunch_receipt(lunch))
+
+
+class MayHostParties(BasePermission):
+    """Hosts, and someone with a public email who will get a personal party when they
+    start their first one."""
+
+    message = "Only hosts can keep local menus."
+
+    def has_permission(self, request, view) -> bool:
+        user = request.user
+        if user.org_id is None:
+            return accounts.is_public_email(user.email)
+        return user.has_perm(Permission.SESSION_CREATE)
+
+
+class LocalMenusView(APIView):
+    """GET /api/local-menus: the menus you keep. POST: add one.
+
+    The host's own list of a restaurant that isn't on Swiggy, with its dishes and
+    prices. Only its owner sees or changes it; a party started with it gets a copy.
+    """
+
+    permission_classes = [IsAuthenticated, MayHostParties]
+
+    def get(self, request):
+        menus = LocalMenu.objects.filter(owner=request.user)
+        return Response(LocalMenuSerializer(menus, many=True).data)
+
+    def post(self, request):
+        serializer = LocalMenuSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if LocalMenu.objects.filter(owner=request.user).count() >= MAX_MENUS:
+            raise Conflict(
+                f"You already keep {MAX_MENUS} local menus. Delete one to add another."
+            )
+        menu = serializer.save(owner=request.user)
+        return Response(LocalMenuSerializer(menu).data, status=status.HTTP_201_CREATED)
+
+
+class LocalMenuView(APIView):
+    """GET/PUT/DELETE /api/local-menus/<id>: one of your menus. A PUT replaces it
+    (its dishes too); parties already started keep the copy they were given."""
+
+    permission_classes = [IsAuthenticated, MayHostParties]
+
+    def _menu(self, request, menu_id) -> LocalMenu:
+        return get_object_or_404(LocalMenu, id=menu_id, owner=request.user)
+
+    def get(self, request, menu_id):
+        return Response(LocalMenuSerializer(self._menu(request, menu_id)).data)
+
+    def put(self, request, menu_id):
+        menu = self._menu(request, menu_id)
+        serializer = LocalMenuSerializer(menu, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return Response(LocalMenuSerializer(serializer.save()).data)
+
+    def delete(self, request, menu_id):
+        self._menu(request, menu_id).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class JoinView(ParticipantAPIView):

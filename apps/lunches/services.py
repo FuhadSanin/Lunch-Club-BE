@@ -23,6 +23,7 @@ from apps.accounts.models import (
 from apps.core import jobs, notify, tenancy
 from apps.core.errors import Conflict
 from apps.lunches import board
+from apps.lunches.local_menus import is_local
 from apps.lunches.models import (
     Order,
     OrderItem,
@@ -113,10 +114,10 @@ def _name(user: User) -> str:
 
 def tell_host_someone_joined(lunch: OrderSession, guest: User) -> None:
     count = participants(lunch).count()
-    where = f"“{lunch.name}” has" if lunch.name else "Your lunch has"
+    where = f"“{lunch.name}” has" if lunch.name else "Your food party has"
     _tell_host(
         lunch,
-        f"{_name(guest)} joined your party",
+        f"{_name(guest)} joined your food party",
         f"{where} {count} {'person' if count == 1 else 'people'} now.",
     )
 
@@ -171,7 +172,7 @@ def ensure_free(user: User) -> None:
     if busy := running_party(user):
         what = "Finish" if busy.host_id == user.id else "Leave"
         raise Conflict(
-            f"You're already in “{busy.name or 'a lunch'}”. {what} it first,"
+            f"You're already in “{busy.name or 'a food party'}”. {what} it first,"
             " then start a new one."
         )
 
@@ -185,7 +186,8 @@ def _ensure_company_free(org_id: UUID) -> None:
     running = OrderSession.objects.filter(_active(), org_id=org_id).first()
     if running is not None:
         raise Conflict(
-            f"“{running.name or 'A lunch'}” is still running. Close it first, then "
+            f"“{running.name or 'A food party'}” is still running. "
+            "Close it first, then "
             "start a new one."
         )
 
@@ -245,16 +247,17 @@ def join(user: User, lunch_id) -> OrderSession:
             return lunch
         if lunch.org.kind != OrgKind.PERSONAL:
             raise PermissionDenied(
-                f"This lunch belongs to {lunch.org.name}. Only people from "
+                f"This food party belongs to {lunch.org.name}. Only people from "
                 "that company can join it."
             )
         if SessionMember.objects.filter(session=lunch, user=user).exists():
             return lunch
         if lunch.status != SessionStatus.OPEN or lunch.cutoff_at <= timezone.now():
-            raise ParseError("This lunch has closed.")
+            raise ParseError("This food party has closed.")
         if not lunch.joining_open:
             raise PermissionDenied(
-                f"{lunch.host.name or 'The host'} has closed this lunch to new people. "
+                f"{lunch.host.name or 'The host'} has closed this food party to new "
+                "people. "
                 "Ask them for a new link or to open it again."
             )
         SessionMember.objects.create(session=lunch, user=user, org_id=lunch.org_id)
@@ -283,9 +286,9 @@ def leave(lunch: OrderSession, user: User) -> None:
     """
     if lunch.org_id == user.org_id:
         raise Conflict(
-            "You host this lunch. Close it instead."
+            "You host this food party. Close it instead."
             if lunch.host_id == user.id
-            else "This is your company's lunch, so you can't leave it."
+            else "This is your company's food party, so you can't leave it."
         )
     ordering = lunch.status in RUNNING and lunch.status != SessionStatus.OPEN
     if ordering and lunch.items.filter(user=user).exists():
@@ -300,7 +303,7 @@ def leave(lunch: OrderSession, user: User) -> None:
 
 def _ensure_open(lunch: OrderSession) -> None:
     if lunch.status != SessionStatus.OPEN or timezone.now() >= lunch.cutoff_at:
-        raise Conflict("Picks for this lunch are closed.")
+        raise Conflict("Picks for this food party are closed.")
 
 
 def _ensure_editable(lunch: OrderSession, user: User) -> None:
@@ -416,7 +419,7 @@ def tick(lunch: OrderSession, kind: str, key: str, done: bool) -> None:
     select_for_update, so two hosts ticking at once don't lose each other's ticks.
     """
     if lunch.status == SessionStatus.CANCELLED or lunch.closed_at is not None:
-        raise Conflict("This lunch is over.")
+        raise Conflict("This food party is over.")
     field, of = TICKS[kind]
     value: str | UUID = key
     if of == "person":
@@ -432,7 +435,7 @@ def tick(lunch: OrderSession, kind: str, key: str, done: bool) -> None:
             else lunch.items.filter(restaurant_name=value)
         )
         if not picked.exists():
-            raise ValidationError({"key": [f"No {of} with dishes in this lunch."]})
+            raise ValidationError({"key": [f"No {of} with dishes in this food party."]})
         ticked.append(value)
     elif not done and value in ticked:
         ticked.remove(value)
@@ -475,10 +478,23 @@ def lock(lunch: OrderSession) -> None:
         board.publish(lunch)
         return
 
-    restaurants = sorted({item.restaurant_name for item in items})
+    # A local menu isn't on Swiggy: its restaurant gets an order of its own, which the
+    # host places directly with it (never mixed into a Swiggy checkout).
+    restaurants = sorted(
+        {item.restaurant_name for item in items if not is_local(item.restaurant_id)}
+    )
     size = settings.MAX_RESTAURANTS_PER_ORDER
-    for start_at in range(0, len(restaurants), size):
-        batch = set(restaurants[start_at : start_at + size])
+    batches = [
+        set(restaurants[start_at : start_at + size])
+        for start_at in range(0, len(restaurants), size)
+    ]
+    batches += [
+        {name}
+        for name in sorted(
+            {item.restaurant_name for item in items if is_local(item.restaurant_id)}
+        )
+    ]
+    for batch in batches:
         batch_items = [item for item in items if item.restaurant_name in batch]
         order = Order.objects.create(
             session=lunch,
@@ -496,7 +512,7 @@ def lock(lunch: OrderSession) -> None:
     transaction.on_commit(
         lambda: notify.email(
             [host_email],
-            "Lunch picks are locked: confirm the order",
+            "Food party picks are locked: confirm the order",
             f"Everyone's picks are in. Check the cart and confirm the order: {link}",
         )
     )
@@ -511,7 +527,9 @@ def unlock(lunch: OrderSession, cutoff_at=None) -> None:
     Expects `lunch` locked with select_for_update.
     """
     if lunch.status != SessionStatus.LOCKED:
-        raise Conflict("Only a locked lunch that isn't ordered yet can be unlocked.")
+        raise Conflict(
+            "Only a locked food party that isn't ordered yet can be unlocked."
+        )
     lunch.orders.all().delete()
     if cutoff_at is None and lunch.cutoff_at <= timezone.now():
         cutoff_at = timezone.now() + UNLOCK_GRACE
@@ -534,7 +552,7 @@ def close(lunch: OrderSession) -> None:
     Expects `lunch` locked with select_for_update.
     """
     if lunch.status != SessionStatus.DELIVERED:
-        raise Conflict("A lunch closes once its food has arrived.")
+        raise Conflict("A food party closes once its food has arrived.")
     if lunch.closed_at is None:
         lunch.closed_at = timezone.now()
         lunch.save(update_fields=["closed_at", "updated_at"])
@@ -547,7 +565,7 @@ def cancel(lunch: OrderSession) -> None:
     Expects `lunch` locked with select_for_update.
     """
     if lunch.status not in (SessionStatus.OPEN, SessionStatus.LOCKED):
-        raise Conflict("This lunch has already been ordered.")
+        raise Conflict("This food party has already been ordered.")
     lunch.orders.all().delete()
     lunch.status = SessionStatus.CANCELLED
     lunch.save(update_fields=["status", "updated_at"])

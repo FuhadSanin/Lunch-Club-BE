@@ -17,7 +17,7 @@ def no_wildcard_hosts(app_configs, **kwargs):
     return [
         Warning(
             f"DJANGO_ALLOWED_HOSTS accepts whole families of hosts: {', '.join(wide)}.",
-            hint="List the exact host names, like lunchclubbe.vercel.app.",
+            hint="List the exact host names, like tiffmate-api.vercel.app.",
             id="lunch.W001",
         )
     ]

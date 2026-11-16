@@ -157,8 +157,9 @@ class OrderItem(BaseModel):
         related_name="items",
     )
     restaurant_name = models.CharField(max_length=200)
-    # Swiggy's id for the restaurant, so the host can open its page; empty if unknown.
-    restaurant_id = models.CharField(max_length=20, blank=True)
+    # Swiggy's id for the restaurant, so the host can open its page; empty if unknown;
+    # "local-<id>" for a restaurant from a host's local menu.
+    restaurant_id = models.CharField(max_length=48, blank=True)
     dish_name = models.CharField(max_length=200)
     quantity = models.PositiveSmallIntegerField()
     price_paise = models.PositiveIntegerField()
@@ -179,3 +180,34 @@ class OrderItem(BaseModel):
     @property
     def total_paise(self) -> int:
         return self.quantity * self.price_paise
+
+
+class LocalMenu(BaseModel):
+    """A restaurant's menu a host keeps themselves: a local place that isn't on Swiggy.
+
+    Made by hand in the web app, or by the host's AI assistant from a photo of the
+    menu. When a party is started with it, the restaurant and its dishes are copied
+    into that party's list (`OrderSession.offered_restaurants`), so everyone in the
+    party sees the same menu; later edits don't change a party already started.
+
+    Images are a link, or a small picture kept in the row (a data URL) so there is
+    nothing else to host. `items` is a list of
+    `{id, name, price_paise, image, veg}`.
+    """
+
+    owner = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="local_menus"
+    )
+    name = models.CharField(max_length=120)
+    image = models.TextField(blank=True)
+    rating = models.FloatField(null=True, blank=True)
+    distance_km = models.FloatField(null=True, blank=True)
+    items = models.JSONField(default=list)
+
+    class Meta:
+        db_table = "local_menus"
+        ordering = ["name"]
+        indexes = [models.Index(fields=["owner", "name"], name="local_menus_owner")]
+
+    def __str__(self) -> str:
+        return f"{self.name} ({len(self.items)} dishes)"

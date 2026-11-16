@@ -97,7 +97,7 @@ def test_a_public_email_starts_a_lunch_in_a_personal_party_made_for_them(db):
     assert (board["address"]["lat"], board["address"]["lng"]) == (10.01, 76.36)
     asha.refresh_from_db()
     assert asha.org.kind == OrgKind.PERSONAL
-    assert asha.org.name == "Asha's party"
+    assert asha.org.name == "Asha's food party"
     assert asha.org.email_domain == ""
     assert asha.org.created_by == asha
     assert set(asha.permissions) == ALL_PERMISSIONS

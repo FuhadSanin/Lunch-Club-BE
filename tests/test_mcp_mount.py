@@ -134,7 +134,7 @@ def test_the_server_starts_for_each_request_under_wsgi(monkeypatch):
     )
 
     assert status.startswith("200"), body
-    assert json.loads(body)["result"]["serverInfo"]["name"] == "Lunch Club"
+    assert json.loads(body)["result"]["serverInfo"]["name"] == "Tiffmate"
 
 
 def test_a_host_that_is_not_ours_is_refused():

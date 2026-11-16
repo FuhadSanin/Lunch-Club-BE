@@ -151,7 +151,7 @@ check go away as soon as the API has answered.
 
 ### Decision: Signing out asks first
 The sign-out icon is small and sits next to the theme switch, so it opens a dialog
-("Sign out of Lunch Board?") instead of signing out at once.
+("Sign out of Tiffmate?") instead of signing out at once.
 
 ### Decision: Two downloads, one per kind of visitor
 The landing page and the signed-in app (`src/Shell.tsx`) are separate files, and the

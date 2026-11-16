@@ -6,12 +6,14 @@ from apps.accounts.models import Permission
 # What each permission lets someone do, to finish the sentence "Your role doesn't let
 # you ...". Said in the app's words, because people read this on screen.
 _WHAT = {
-    Permission.SESSION_CREATE: "start a lunch",
-    Permission.SESSION_READ: "see lunches",
-    Permission.SESSION_UPDATE: "run a lunch (lock picks, tick things off, close it)",
-    Permission.SESSION_DELETE: "call off a lunch",
+    Permission.SESSION_CREATE: "start a food party",
+    Permission.SESSION_READ: "see food parties",
+    Permission.SESSION_UPDATE: (
+        "run a food party (lock picks, tick things off, close it)"
+    ),
+    Permission.SESSION_DELETE: "call off a food party",
     Permission.PICK_CREATE: "pick dishes",
-    Permission.PICK_UPDATE: "change picks or skip a lunch",
+    Permission.PICK_UPDATE: "change picks or skip a food party",
     Permission.PICK_DELETE: "remove picks",
     Permission.REVIEW_CREATE: "confirm the cart",
     Permission.ORDER_UPDATE: "update orders",

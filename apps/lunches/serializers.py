@@ -61,9 +61,21 @@ class StartLunchSerializer(serializers.ModelSerializer):
         many=True, required=False, max_length=100
     )
 
+    # The host's local menus to offer too (see LocalMenu); the server copies their
+    # dishes into the list, so a client can't make up a menu or a price.
+    local_menu_ids = serializers.ListField(
+        child=serializers.UUIDField(), required=False, max_length=20
+    )
+
     class Meta:
         model = OrderSession
-        fields = ["name", "cutoff_at", "address", "offered_restaurants"]
+        fields = [
+            "name",
+            "cutoff_at",
+            "address",
+            "offered_restaurants",
+            "local_menu_ids",
+        ]
 
     def validate_cutoff_at(self, value):
         now = timezone.now()
@@ -75,8 +87,12 @@ class StartLunchSerializer(serializers.ModelSerializer):
 class ItemSerializer(serializers.ModelSerializer):
     user = PersonSerializer(read_only=True)
     restaurant_name = serializers.CharField(max_length=200, trim_whitespace=True)
+    # Swiggy's number, or "local-<id>" for a restaurant from a host's local menu.
     restaurant_id = serializers.RegexField(
-        r"^\d{1,20}$", allow_blank=True, required=False, default=""
+        r"^(\d{1,20}|local-[0-9a-f-]{36})$",
+        allow_blank=True,
+        required=False,
+        default="",
     )
     dish_name = serializers.CharField(max_length=200, trim_whitespace=True)
     quantity = serializers.IntegerField(min_value=1, max_value=20)

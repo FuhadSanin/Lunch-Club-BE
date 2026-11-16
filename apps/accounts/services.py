@@ -103,9 +103,9 @@ def invite(inviter: User, emails: Iterable[str]) -> list[Invite]:
 
 def _email_invites(inviter: User, org: Organization, emails: list[str]) -> None:
     who = inviter.name or inviter.email
-    subject = f"{who} invited you to lunch with {org.name}"
+    subject = f"{who} invited you to a food party with {org.name}"
     body = (
-        f"{who} uses Lunch Board for group lunch. Sign in with your "
+        f"{who} uses Tiffmate for group food orders. Sign in with your "
         f"@{org.email_domain} Google account to pick your food: {settings.APP_URL}"
     )
     for email in emails:  # one each, so nobody sees the others' addresses
@@ -130,7 +130,7 @@ def create_company(user: User, name: str) -> Organization:
     if is_public_email(user.email):
         raise Conflict(
             f"@{domain} is a public email address, so it can't make a company. "
-            "Start a lunch and share its link instead."
+            "Start a food party and share its link instead."
         )
     if Organization.objects.filter(kind=OrgKind.COMPANY, email_domain=domain).exists():
         raise Conflict("A company for your email domain already exists.")
@@ -153,7 +153,7 @@ def create_personal_org(user: User) -> Organization:
         raise Conflict("Set up or join your company first.")
     first = (user.name or user.email.split("@")[0]).split()[0].title()
     org = Organization.objects.create(
-        name=f"{first}'s party",
+        name=f"{first}'s food party",
         kind=OrgKind.PERSONAL,
         email_domain="",
         created_by=user,

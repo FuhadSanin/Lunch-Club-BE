@@ -204,7 +204,7 @@ def test_prompts_guide_a_host_and_a_guest():
 
 
 def test_no_token_means_a_clear_message(db):
-    assert "not signed in to Lunch Club" in failing(None, "whoami")
+    assert "not signed in to Tiffmate" in failing(None, "whoami")
 
 
 def test_a_rejected_token_says_to_connect_again(db):
@@ -300,7 +300,7 @@ def test_over_http_the_servers_own_token_is_never_used_for_a_caller(member):
 
     assert response.status_code == 200
     assert member.email not in response.text
-    assert "not signed in to Lunch Club" in response.text
+    assert "not signed in to Tiffmate" in response.text
 
 
 def test_over_http_a_bad_token_is_refused(db):
@@ -361,7 +361,7 @@ def test_the_server_says_where_to_sign_in(db):
             "authorization_servers": ["https://api.example"],
             "bearer_methods_supported": ["header"],
             "scopes_supported": ["lunch"],
-            "resource_name": "Lunch Club",
+            "resource_name": "Tiffmate",
         }
 
 
@@ -534,7 +534,7 @@ def test_a_company_member_who_cannot_start_lunches_is_told_why(member, world):
     )
 
     assert OrderSession.objects.count() == 0
-    assert "role doesn't let you start a lunch" in message.lower()
+    assert "role doesn't let you start a food party" in message.lower()
 
 
 def test_a_company_host_starts_a_lunch(host, world):
@@ -667,7 +667,7 @@ def test_the_host_can_close_the_share_link_and_a_newcomer_is_told(world):
 
     closed = run(host, "set_link_open", lunch_id=link, allow_new_people=False)
     assert closed["link_open_to_new_people"] is False
-    assert "closed this lunch to new people" in failing(
+    assert "closed this food party to new people" in failing(
         newcomer, "join_lunch", lunch=link
     )
 
@@ -755,3 +755,71 @@ def test_a_lunch_that_does_not_exist_is_not_found(world):
     )
 
     assert "couldn't find" in message.lower() or "not found" in message.lower()
+
+
+# ---- local menus ----
+
+PHOTO_MENU = [
+    {"name": "Meals", "price": 90, "veg": True},
+    {"name": "Fish fry", "price": 150.5},
+]
+
+
+def test_an_assistant_saves_a_menu_it_read_from_a_photo(host):
+    saved = run(
+        host,
+        "add_local_menu",
+        restaurant_name="Amma's Mess",
+        items=PHOTO_MENU,
+        rating=4.3,
+        distance_km=1.4,
+    )
+
+    assert saved["dishes"] == 2 and saved["menu_id"]
+    listed = run(host, "list_local_menus")
+    assert listed[0]["restaurant"] == "Amma's Mess"
+    assert {d["name"]: d["price"] for d in listed[0]["dishes"]} == {
+        "Meals": 90,
+        "Fish fry": 150.5,
+    }
+
+
+def test_a_menu_needs_a_name_and_a_priced_dish(host):
+    assert "name" in failing(
+        host, "add_local_menu", restaurant_name="", items=PHOTO_MENU
+    )
+    assert "items" in failing(
+        host, "add_local_menu", restaurant_name="Amma's Mess", items=[]
+    )
+
+
+def test_a_party_is_started_with_a_saved_local_menu(host, world):
+    saved = run(host, "add_local_menu", restaurant_name="Amma's Mess", items=PHOTO_MENU)
+
+    started = run(
+        host,
+        "start_lunch",
+        closes_at="12:30",
+        delivery_place="Infopark",
+        local_menu_ids=[saved["menu_id"]],
+    )
+
+    lunch = OrderSession.objects.get(id=started["lunch_id"])
+    assert lunch.offered_restaurants[0]["name"] == "Amma's Mess"
+    assert lunch.offered_restaurants[0]["local"] is True
+
+
+def test_deleting_a_menu_needs_a_yes(host):
+    saved = run(host, "add_local_menu", restaurant_name="Amma's Mess", items=PHOTO_MENU)
+
+    assert "Not confirmed" in failing(
+        host, "delete_local_menu", menu_id=saved["menu_id"]
+    )
+    assert run(host, "delete_local_menu", menu_id=saved["menu_id"], confirm=True)
+    assert run(host, "list_local_menus") == []
+
+
+def test_a_member_cannot_save_a_menu(member):
+    assert "Only hosts" in failing(
+        member, "add_local_menu", restaurant_name="X", items=PHOTO_MENU
+    )

@@ -1,4 +1,4 @@
-"""Serves the Lunch Club MCP server from the API's own web address (/mcp), so a host
+"""Serves the Tiffmate MCP server from the API's own web address (/mcp), so a host
 that runs only the Django app (Vercel) needs no second service.
 
 The MCP server is an ASGI app and the API runs as WSGI, so the MCP requests are handed

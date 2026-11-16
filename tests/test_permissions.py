@@ -141,7 +141,7 @@ def test_being_refused_says_what_you_cannot_do_and_who_can_fix_it(member):
 
     assert response.status_code == 403
     assert response.json()["detail"] == (
-        "Your role doesn't let you start a lunch. Ask a host to change your role. "
+        "Your role doesn't let you start a food party. Ask a host to change your role. "
         "(It needs session_create.)"
     )
 

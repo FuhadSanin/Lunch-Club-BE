@@ -43,7 +43,7 @@ def test_the_host_closes_the_link_to_new_people_and_opens_it_again():
     newcomer = person("gus")
     refused = join(newcomer, lunch_id)
     assert refused.status_code == 403
-    assert "closed this lunch to new people" in refused.json()["detail"]
+    assert "closed this food party to new people" in refused.json()["detail"]
     assert not SessionMember.objects.exists()
 
     assert set_joining(host, lunch_id, True).json()["joining_open"] is True
@@ -87,7 +87,7 @@ def test_the_link_stops_working_at_the_cutoff():
     refused = join(person("gus"), lunch_id)
 
     assert refused.status_code == 400
-    assert refused.json()["detail"] == "This lunch has closed."
+    assert refused.json()["detail"] == "This food party has closed."
 
 
 def test_once_picks_lock_there_is_no_link_left_to_close(host, lunch):

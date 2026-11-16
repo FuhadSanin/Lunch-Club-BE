@@ -1,4 +1,4 @@
-"""The tools, prompts and instructions of the Lunch Club MCP server."""
+"""The tools, prompts and instructions of the Tiffmate MCP server."""
 
 import os
 from dataclasses import dataclass, field
@@ -10,14 +10,18 @@ import httpx
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import BaseModel, Field
 
 from mcp_server import helpers
 from mcp_server.api import MISSING, Api
 
 INSTRUCTIONS = """\\
-Lunch Club runs group lunches: someone starts a lunch (a cutoff time and a delivery
-place), shares one link, everyone picks dishes from Swiggy menus, the host locks the
-picks, reviews the cart, then orders in the Swiggy app and marks it ordered.
+Tiffmate runs group food orders for any meal or occasion (breakfast, lunch, dinner,
+snacks, food parties). Someone starts a food party (a cutoff time and a delivery
+place), shares
+one link, everyone picks dishes from Swiggy menus, the host locks the picks, reviews
+the cart, then orders in the Swiggy app and marks it ordered. A "food party" is what the
+tools call a lunch in their names (start_lunch, get_lunch, ...).
 
 You act as the signed-in person, with their own permissions. Typical flow for a host:
 1. start_lunch (ask for the closing time and the delivery place if you don't have them),
@@ -31,6 +35,23 @@ finish_my_order. Never invent ids: use the ones tools return. Money is in rupees
 Ask before anything that is hard to undo: confirm_lunch and cancel_lunch need an
 explicit yes from the person.
 """
+
+
+class MenuItem(BaseModel):
+    """One dish of a local menu."""
+
+    name: str = Field(description="The dish's name, as the menu writes it.")
+    price: float = Field(description="Price in rupees, like 120 or 89.50.")
+    image: str = Field(
+        default="",
+        description="Optional picture of the dish: a link starting with https://.",
+    )
+    veg: bool | None = Field(
+        default=None,
+        description="True for vegetarian, false for non-veg, leave out if the "
+        "menu doesn't say.",
+    )
+
 
 READ = ToolAnnotations(read_only_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False)
@@ -46,7 +67,7 @@ class Config:
     )
     web_url: str = field(
         default_factory=lambda: os.environ.get(
-            "LUNCHCLUB_WEB_URL", "https://lunchclubfe.vercel.app"
+            "LUNCHCLUB_WEB_URL", "https://tiffmate.vercel.app"
         )
     )
     timezone: str = field(
@@ -71,7 +92,7 @@ class Config:
 
 def create_server(config: Config | None = None) -> MCPServer:
     cfg = config or Config()
-    server = MCPServer("Lunch Club", instructions=INSTRUCTIONS)
+    server = MCPServer("Tiffmate", instructions=INSTRUCTIONS)
 
     def api_for(ctx: Context) -> Api:
         """The API as the caller. Over HTTP that is the token on their own request, and
@@ -94,7 +115,7 @@ def create_server(config: Config | None = None) -> MCPServer:
         lat: float | None,
         lng: float | None,
     ) -> tuple[float, float]:
-        """Coordinates restaurants are looked up from: given, a place, or a lunch's."""
+        """Coordinates restaurants are looked up from: given, a place, or a party's."""
         if lat is not None and lng is not None:
             return lat, lng
         if near:
@@ -119,18 +140,92 @@ def create_server(config: Config | None = None) -> MCPServer:
 
     @server.tool(annotations=READ)
     async def whoami(ctx: Context) -> dict[str, Any]:
-        """Who you are acting as in Lunch Club, and which company or party."""
+        """Who you are acting as in Tiffmate, and which company or food party."""
         me = await api_for(ctx).get("me")
         org = me.get("org") or {}
         return {
             "name": me["name"],
             "email": me["email"],
             "group": org.get("name")
-            or "none yet (a party is made when you start a lunch)",
+            or "none yet (made when you start your first food party)",
             "kind": org.get("kind"),
             "can_start_lunches": bool(me.get("public_email"))
             or any(p == "session_create" for p in me.get("permissions", [])),
         }
+
+    # ---- local menus ----
+
+    @server.tool(annotations=WRITE)
+    async def add_local_menu(
+        ctx: Context,
+        restaurant_name: str,
+        items: list[MenuItem],
+        rating: float | None = None,
+        distance_km: float | None = None,
+        image: str = "",
+    ) -> dict[str, Any]:
+        """Save a local restaurant's menu (one that isn't on Swiggy), so you can offer
+        it when you start a party. Read it from the photo or text the person gave you:
+        every dish with its price. restaurant_name and at least one dish with a price
+        are required; rating (0 to 5), distance_km and an https image link are
+        optional. Ask the person for anything you can't read. Then offer to start a
+        food party with it (start_lunch with local_menu_ids)."""
+        body: dict[str, Any] = {
+            "name": restaurant_name,
+            "image": image,
+            "items": [
+                {
+                    "name": i.name,
+                    "price_paise": round(i.price * 100),
+                    "image": i.image,
+                    "veg": i.veg,
+                }
+                for i in items
+            ],
+        }
+        if rating is not None:
+            body["rating"] = rating
+        if distance_km is not None:
+            body["distance_km"] = distance_km
+        menu = await api_for(ctx).call("POST", "local-menus", json=body)
+        return {
+            "menu_id": menu["id"],
+            "restaurant": menu["name"],
+            "dishes": len(menu["items"]),
+            "next": "It is in the Local menu page of Tiffmate. Offer to start a party "
+            "with it (start_lunch with local_menu_ids).",
+        }
+
+    @server.tool(annotations=READ)
+    async def list_local_menus(ctx: Context) -> list[dict[str, Any]]:
+        """The local menus you keep (restaurants that aren't on Swiggy)."""
+        menus = await api_for(ctx).get("local-menus")
+        return [
+            {
+                "menu_id": m["id"],
+                "restaurant": m["name"],
+                "rating": m.get("rating"),
+                "distance_km": m.get("distance_km"),
+                "dishes": [
+                    {"name": i["name"], "price": helpers.rupees(i["price_paise"])}
+                    for i in m["items"]
+                ],
+            }
+            for m in menus
+        ]
+
+    @server.tool(annotations=DESTRUCTIVE)
+    async def delete_local_menu(
+        ctx: Context, menu_id: str, confirm: bool = False
+    ) -> str:
+        """Delete one of your local menus. Needs confirm=true (ask first). Food parties
+        already started keep their copy."""
+        if not confirm:
+            raise ToolError(
+                "Not confirmed. Ask the person, then call with confirm=true."
+            )
+        await api_for(ctx).call("DELETE", f"local-menus/{menu_id}")
+        return "Deleted."
 
     # ---- starting and sharing ----
 
@@ -152,13 +247,15 @@ def create_server(config: Config | None = None) -> MCPServer:
         name: str = "",
         delivery_lat: float | None = None,
         delivery_lng: float | None = None,
+        local_menu_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Start a group lunch and get its share link.
+        """Start a group food party and get its share link.
 
         closes_at: when picks close, like "12:30", "1:15 pm" or "in 90 minutes" (must be
-        within the next 24 hours). delivery_place: where lunch goes, like "Infopark
+        within the next 24 hours). delivery_place: where the food goes, like "Infopark
         Kochi" (the best match is used; its full address is returned so you can check
-        it). name: optional, like "Friday team lunch".
+        it). name: optional, like "Friday team party". local_menu_ids: optional menu_ids
+        from list_local_menus, to offer those local restaurants in the food party.
         """
         api = api_for(ctx)
         now = cfg.clock()
@@ -183,6 +280,8 @@ def create_server(config: Config | None = None) -> MCPServer:
         }
         if name.strip():
             body["name"] = name.strip()
+        if local_menu_ids:
+            body["local_menu_ids"] = local_menu_ids
         board = await api.call("POST", "lunches", json=body)
         return {
             "lunch_id": board["id"],
@@ -195,7 +294,7 @@ def create_server(config: Config | None = None) -> MCPServer:
 
     @server.tool(annotations=READ)
     async def share_lunch(ctx: Context, lunch_id: str) -> dict[str, str]:
-        """The link to share for a lunch, and a message ready to paste in a chat."""
+        """The link to share for a party, and a message ready to paste in a chat."""
         board = await board_of(api_for(ctx), lunch_id)
         link = cfg.link(board["id"])
         title = board.get("name") or "lunch"
@@ -223,7 +322,7 @@ def create_server(config: Config | None = None) -> MCPServer:
 
     @server.tool(annotations=WRITE)
     async def join_lunch(ctx: Context, lunch: str) -> dict[str, Any]:
-        """Join a lunch from its shared link (or id), so you can pick dishes."""
+        """Join a food party from its shared link (or id), so you can pick dishes."""
         board = await api_for(ctx).call(
             "POST", f"lunches/{helpers.lunch_id_from(lunch)}/join"
         )
@@ -235,7 +334,7 @@ def create_server(config: Config | None = None) -> MCPServer:
     async def list_lunches(
         ctx: Context, running_only: bool = True
     ) -> list[dict[str, Any]]:
-        """Your lunches (ones you host and ones you joined), newest first."""
+        """Your food parties (ones you host and ones you joined), newest first."""
         lunches = await api_for(ctx).get("lunches")
         running = {"open", "locked", "confirmed", "placed"}
         return [
@@ -254,7 +353,7 @@ def create_server(config: Config | None = None) -> MCPServer:
 
     @server.tool(annotations=READ)
     async def get_lunch(ctx: Context, lunch_id: str) -> dict[str, Any]:
-        """A lunch's board: status, who picked what, totals by restaurant, orders."""
+        """A party's board: status, who picked what, totals by restaurant, orders."""
         board = await board_of(api_for(ctx), lunch_id)
         return helpers.summarize_lunch(board, cfg.tz, cfg.link(board["id"]))
 
@@ -395,11 +494,11 @@ def create_server(config: Config | None = None) -> MCPServer:
 
     @server.tool(annotations=WRITE)
     async def skip_lunch(ctx: Context, lunch_id: str) -> str:
-        """Sit this lunch out: your picks are dropped. It's final: only the host can
+        """Sit this party out: your picks are dropped. It's final: only the host can
         let you back in (the web app has a Reopen button)."""
         lid = helpers.lunch_id_from(lunch_id)
         await api_for(ctx).call("PUT", f"lunches/{lid}/skip")
-        return "You're skipping this lunch."
+        return "You're skipping this food party."
 
     # ---- running the lunch (host) ----
 
@@ -440,7 +539,7 @@ def create_server(config: Config | None = None) -> MCPServer:
     async def cancel_lunch(
         ctx: Context, lunch_id: str, confirm: bool = False
     ) -> dict[str, Any]:
-        """Call off a lunch that isn't ordered yet. Needs confirm=true (ask first)."""
+        """Call off a party that isn't ordered yet. Needs confirm=true (ask first)."""
         if not confirm:
             raise ToolError(
                 "Not confirmed. Ask the person, then call with confirm=true."
@@ -474,7 +573,7 @@ def create_server(config: Config | None = None) -> MCPServer:
 
     @server.tool(annotations=READ)
     async def my_notifications(ctx: Context) -> dict[str, Any]:
-        """What Lunch Club told you lately (lunch started, ordered, arrived)."""
+        """What Tiffmate told you lately (food party started, ordered, arrived)."""
         got = await api_for(ctx).get("notifications")
         return {
             "unread": got["unread"],
@@ -499,14 +598,14 @@ def create_server(config: Config | None = None) -> MCPServer:
 
     @server.prompt()
     def start_team_lunch(closes_at: str = "", place: str = "", name: str = "") -> str:
-        """Start a lunch and get the link to share."""
+        """Start a food party and get the link to share."""
         asked = [
             f"Picks close at: {closes_at or '(ask me)'}",
             f"Deliver to: {place or '(ask me)'}",
             f"Name: {name or '(optional, suggest one)'}",
         ]
         return (
-            "Start a Lunch Club group lunch for me.\n"
+            "Start a Tiffmate group food party for me.\n"
             + "\n".join(asked)
             + "\nIf anything is missing, ask me first. Then use start_lunch, then "
             "share_lunch and show me the message to send my team."
@@ -514,9 +613,9 @@ def create_server(config: Config | None = None) -> MCPServer:
 
     @server.prompt()
     def pick_my_lunch(lunch_link: str, craving: str = "") -> str:
-        """Join a lunch from its link and choose what to eat."""
+        """Join a food party from its link and choose what to eat."""
         return (
-            f"Join this Lunch Club lunch: {lunch_link}\n"
+            f"Join this Tiffmate food party: {lunch_link}\n"
             f"I feel like: {craving or '(ask me what I want)'}\n"
             "Use join_lunch, find what's available with find_restaurants / get_menu / "
             "search_dishes, suggest a few options, and add my choice with pick_dish. "

@@ -19,6 +19,7 @@ from django.utils import timezone
 from apps.core import jobs, notify, tenancy
 from apps.core.errors import Conflict, RetryLater
 from apps.lunches import board
+from apps.lunches.local_menus import is_local
 from apps.lunches.models import Order, OrderSession, OrderStatus, SessionStatus
 from apps.lunches.services import lunch_link
 from apps.ordering.progress import Progress
@@ -55,7 +56,7 @@ def confirm(lunch: OrderSession) -> None:
     Expects `lunch` locked with select_for_update.
     """
     if lunch.status != SessionStatus.LOCKED:
-        raise Conflict("Only a lunch whose picks are locked can be confirmed.")
+        raise Conflict("Only a food party whose picks are locked can be confirmed.")
     lunch.status = SessionStatus.CONFIRMED
     lunch.save(update_fields=["status", "updated_at"])
     for order in lunch.orders.all():
@@ -90,6 +91,15 @@ def place(org_id: UUID, order_id: UUID) -> None:
         order.bot_steps = []  # a fresh checklist for this attempt
         order.save(update_fields=["status", "bot_steps", "updated_at"])
         request = _place_request(order)
+
+    if any(is_local(line.restaurant_id) for line in request.lines):
+        _hand_to_host(
+            org_id,
+            order_id,
+            "This restaurant is a local menu, which isn't on Swiggy. Order it "
+            "directly with the restaurant, then mark it as ordered here.",
+        )
+        return
 
     provider = get_provider()
     progress = Progress(lambda steps: _save_steps(org_id, order_id, steps))
@@ -282,7 +292,7 @@ def _hand_to_host(org_id: UUID, order_id: UUID, reason: str) -> None:
     logger.warning(
         "Swiggy order handed to the host", extra={"fields": {"order_id": order_id}}
     )
-    notify.email([host_email], "Your lunch order needs you", f"{reason}\n\n{link}")
+    notify.email([host_email], "Your food party order needs you", f"{reason}\n\n{link}")
 
 
 def _set_placed(order: Order, platform_order_id: str) -> None:

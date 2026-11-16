@@ -71,7 +71,7 @@ class OAuthGate:
             "authorization_servers": [self.issuer],
             "bearer_methods_supported": ["header"],
             "scopes_supported": [SCOPE],
-            "resource_name": "Lunch Club",
+            "resource_name": "Tiffmate",
         }
 
     async def _valid(self, token: str) -> bool:
@@ -134,7 +134,7 @@ class OAuthGate:
                     401,
                     {
                         "error": "invalid_token" if token else "unauthorized",
-                        "error_description": "Sign in to Lunch Club to use this.",
+                        "error_description": "Sign in to Tiffmate to use this.",
                     },
                     [(b"www-authenticate", challenge.encode())],
                 )

@@ -173,7 +173,7 @@ def test_a_failed_attempt_hands_the_order_to_the_host(
     order.refresh_from_db()
     assert order.status == OrderStatus.NEEDS_HOST
     assert "Automatic ordering failed" in order.last_error
-    assert mail.outbox[-1].subject == "Your lunch order needs you"
+    assert mail.outbox[-1].subject == "Your food party order needs you"
     # A reason the provider gives is passed on word for word.
     fake_provider.error = HostActionRequired("Log in to Swiggy first.")
     Order.objects.filter(id=order.id).update(status=OrderStatus.PENDING)
