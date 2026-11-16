@@ -13,7 +13,7 @@ from apps.lunches.models import LocalMenu
 
 LOCAL_PREFIX = "local-"
 MAX_MENUS = 30
-MAX_ITEMS = 80
+MAX_ITEMS = 300
 # A picture is a link, or a small one kept in the row. Sizes are in characters.
 MAX_RESTAURANT_IMAGE = 80_000
 MAX_ITEM_IMAGE = 30_000

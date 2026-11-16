@@ -168,8 +168,10 @@ def create_server(config: Config | None = None) -> MCPServer:
         it when you start a party. Read it from the photo or text the person gave you:
         every dish with its price. restaurant_name and at least one dish with a price
         are required; rating (0 to 5), distance_km and an https image link are
-        optional. Ask the person for anything you can't read. Then offer to start a
-        food party with it (start_lunch with local_menu_ids)."""
+        optional. A big menu (up to 300 dishes) goes in one call. A dish with no
+        fixed price (like "as per size") can't be saved: ask the person for a price,
+        or leave it out and say so. Ask the person for anything you can't read. Then
+        offer to start a food party with it (start_lunch with local_menu_ids)."""
         body: dict[str, Any] = {
             "name": restaurant_name,
             "image": image,
