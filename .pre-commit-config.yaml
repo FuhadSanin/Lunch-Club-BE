@@ -37,6 +37,11 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+      - id: secrets
+        name: no secrets or pasted commands
+        entry: scripts/check_secrets.sh
+        language: system
+        pass_filenames: true
       - id: security
         name: bandit and pip-audit
         entry: make security
